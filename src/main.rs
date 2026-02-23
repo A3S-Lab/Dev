@@ -99,8 +99,11 @@ enum Commands {
     Install,
     /// List all installed a3s ecosystem tools and brew packages
     List,
-    /// Update all installed a3s ecosystem tools to the latest version
-    Update,
+    /// Update installed a3s ecosystem tools (all if no names given)
+    Update {
+        /// Tool name(s) to update: box, gateway, power (default: all)
+        tools: Vec<String>,
+    },
     /// a3s-code agent scaffolding
     Code {
         #[command(subcommand)]
@@ -514,42 +517,51 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Update => {
-            let tools = [
+        Commands::Update { tools: filter } => {
+            let all_tools = [
                 ("box", "a3s-box", "A3S-Lab", "Box"),
                 ("gateway", "a3s-gateway", "A3S-Lab", "Gateway"),
                 ("power", "a3s-power", "A3S-Lab", "Power"),
+                ("a3s", "a3s", "A3S-Lab", "Dev"),
             ];
-            for (_, binary, owner, repo) in &tools {
-                if which_binary(binary) {
-                    println!("{} updating {}...", "→".cyan(), binary.cyan());
-                    let config = a3s_updater::UpdateConfig {
-                        binary_name: binary,
-                        crate_name: binary,
-                        current_version: "0.0.0",
-                        github_owner: owner,
-                        github_repo: repo,
-                    };
-                    match a3s_updater::run_update(&config).await {
-                        Ok(_) => println!("{} {} updated", "✓".green(), binary.cyan()),
-                        Err(e) => println!("{} {} — {}", "✗".red(), binary.cyan(), e),
-                    }
-                } else {
-                    println!("  {} {} not installed, skipping", "·".dimmed(), binary.dimmed());
-                }
-            }
-            // Also update a3s itself
-            println!("{} updating a3s...", "→".cyan());
-            let config = a3s_updater::UpdateConfig {
-                binary_name: "a3s",
-                crate_name: "a3s",
-                current_version: env!("CARGO_PKG_VERSION"),
-                github_owner: "A3S-Lab",
-                github_repo: "Dev",
+            let targets: Vec<_> = if filter.is_empty() {
+                all_tools.iter().collect()
+            } else {
+                all_tools
+                    .iter()
+                    .filter(|(alias, binary, _, _)| {
+                        filter.iter().any(|f| f == alias || f == binary)
+                    })
+                    .collect()
             };
-            match a3s_updater::run_update(&config).await {
-                Ok(_) => println!("{} a3s updated", "✓".green()),
-                Err(e) => println!("{} a3s — {}", "✗".red(), e),
+            if targets.is_empty() {
+                return Err(DevError::Config(format!(
+                    "unknown tool(s): {} — available: box, gateway, power, a3s",
+                    filter.join(", ")
+                )));
+            }
+            for (_, binary, owner, repo) in targets {
+                let current = if *binary == "a3s" {
+                    env!("CARGO_PKG_VERSION")
+                } else {
+                    "0.0.0"
+                };
+                if *binary != "a3s" && !which_binary(binary) {
+                    println!("  {} {} not installed, skipping", "·".dimmed(), binary.dimmed());
+                    continue;
+                }
+                println!("{} updating {}...", "→".cyan(), binary.cyan());
+                let config = a3s_updater::UpdateConfig {
+                    binary_name: binary,
+                    crate_name: binary,
+                    current_version: current,
+                    github_owner: owner,
+                    github_repo: repo,
+                };
+                match a3s_updater::run_update(&config).await {
+                    Ok(_) => println!("{} {} updated", "✓".green(), binary.cyan()),
+                    Err(e) => println!("{} {} — {}", "✗".red(), binary.cyan(), e),
+                }
             }
         }
 
