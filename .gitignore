@@ -4,3 +4,4 @@ Cargo.lock
 .env
 .env.*
 A3sfile.hcl
+!src/A3sfile.hcl
