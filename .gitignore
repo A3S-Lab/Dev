@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+*.sock
+.env
+.env.*
+A3sfile.hcl
