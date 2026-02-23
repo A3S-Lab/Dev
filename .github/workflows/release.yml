@@ -35,7 +35,7 @@ jobs:
         run: cargo clippy -p a3s -- -D warnings
 
       - name: Tests
-        run: cargo test -p a3s --lib
+        run: cargo test -p a3s
 
   # ───────────────────────────────────────────────
   # Build cross-compiled binaries
