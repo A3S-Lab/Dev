@@ -1,0 +1,266 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ───────────────────────────────────────────────
+  # Gate: CI checks must pass before any publishing
+  # ───────────────────────────────────────────────
+  ci:
+    name: CI Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup workspace context
+        run: bash .github/setup-workspace.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt -p a3s -- --check
+
+      - name: Clippy
+        run: cargo clippy -p a3s -- -D warnings
+
+      - name: Tests
+        run: cargo test -p a3s --lib
+
+  # ───────────────────────────────────────────────
+  # Build cross-compiled binaries
+  # ───────────────────────────────────────────────
+  build:
+    name: Build / ${{ matrix.target }}
+    needs: ci
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup workspace context
+        run: bash .github/setup-workspace.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild == true
+        run: |
+          pip3 install ziglang --quiet
+          cargo install cargo-zigbuild --quiet
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build -p a3s --release --target ${{ matrix.target }}
+          elif [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+            cargo zigbuild -p a3s --release --target ${{ matrix.target }}
+          else
+            cargo build -p a3s --release --target ${{ matrix.target }}
+          fi
+
+      - name: Strip (Linux gnu)
+        if: runner.os == 'Linux' && matrix.use_zigbuild != true && matrix.use_cross != true
+        run: strip "target/${{ matrix.target }}/release/a3s"
+
+      - name: Strip (Linux cross)
+        if: matrix.use_cross == true
+        run: |
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-strip "target/${{ matrix.target }}/release/a3s"
+
+      - name: Strip (Linux musl)
+        if: matrix.use_zigbuild == true
+        run: |
+          sudo apt-get install -y --no-install-recommends llvm
+          llvm-strip "target/${{ matrix.target }}/release/a3s"
+
+      - name: Strip (macOS)
+        if: runner.os == 'macOS'
+        run: strip "target/${{ matrix.target }}/release/a3s"
+
+      - name: Package
+        id: pkg
+        run: |
+          BIN="target/${{ matrix.target }}/release/a3s"
+          VER="${GITHUB_REF_NAME#v}"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)       PLATFORM="darwin-arm64" ;;
+            x86_64-apple-darwin)        PLATFORM="darwin-x86_64" ;;
+            x86_64-unknown-linux-gnu)   PLATFORM="linux-x86_64" ;;
+            aarch64-unknown-linux-gnu)  PLATFORM="linux-arm64" ;;
+            x86_64-unknown-linux-musl)  PLATFORM="linux-x86_64-musl" ;;
+            aarch64-unknown-linux-musl) PLATFORM="linux-arm64-musl" ;;
+            *)                          PLATFORM="${{ matrix.target }}" ;;
+          esac
+          ARCHIVE="a3s-${VER}-${PLATFORM}.tar.gz"
+          tar czf "$ARCHIVE" -C "$(dirname $BIN)" a3s
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+
+  # ───────────────────────────────────────────────
+  # Create GitHub Release with binaries
+  # ───────────────────────────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets
+        run: |
+          mkdir release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) \
+            -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Generate release notes
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | head -2 | tail -1)
+          if [ -z "$PREV_TAG" ]; then
+            echo "Initial release." > /tmp/notes.md
+          else
+            git log "${PREV_TAG}..HEAD" --oneline --no-merges \
+              --pretty=format:"- %s" | head -60 > /tmp/notes.md
+          fi
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" &>/dev/null; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file /tmp/notes.md
+          fi
+
+  # ───────────────────────────────────────────────
+  # Publish to crates.io
+  # ───────────────────────────────────────────────
+  publish-crate:
+    name: Publish to crates.io
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup workspace context
+        run: bash .github/setup-workspace.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        working-directory: crates/dev
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish --allow-dirty
+
+  # ───────────────────────────────────────────────
+  # Update Homebrew formula
+  # ───────────────────────────────────────────────
+  update-homebrew:
+    name: Update Homebrew
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute sha256
+        id: sha
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          sha() { sha256sum "artifacts/$1/a3s-${VER}-$2.tar.gz" | awk '{print $1}'; }
+          echo "ver=$VER"                                          >> "$GITHUB_OUTPUT"
+          echo "macos_arm64=$(sha aarch64-apple-darwin darwin-arm64)"         >> "$GITHUB_OUTPUT"
+          echo "macos_x64=$(sha x86_64-apple-darwin darwin-x86_64)"           >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(sha aarch64-unknown-linux-musl linux-arm64-musl)" >> "$GITHUB_OUTPUT"
+          echo "linux_x64=$(sha x86_64-unknown-linux-musl linux-x86_64-musl)"  >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Regenerate formula
+        working-directory: homebrew-tap
+        env:
+          VER: ${{ steps.sha.outputs.ver }}
+          SHA_MACOS_ARM64: ${{ steps.sha.outputs.macos_arm64 }}
+          SHA_MACOS_X64: ${{ steps.sha.outputs.macos_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.sha.outputs.linux_arm64 }}
+          SHA_LINUX_X64: ${{ steps.sha.outputs.linux_x64 }}
+        run: python3 ../.github/update-homebrew-formula.py
+
+      - name: Commit and push
+        working-directory: homebrew-tap
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/a3s.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update a3s to v${{ steps.sha.outputs.ver }}"
+          git push origin main
