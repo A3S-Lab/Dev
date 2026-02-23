@@ -59,7 +59,11 @@ mod tests {
             "running"
         );
         assert_eq!(
-            ServiceState::Unhealthy { pid: 1, failures: 2 }.label(),
+            ServiceState::Unhealthy {
+                pid: 1,
+                failures: 2
+            }
+            .label(),
             "unhealthy"
         );
         assert_eq!(ServiceState::Stopped.label(), "stopped");
@@ -81,7 +85,10 @@ mod tests {
 
     #[test]
     fn test_pid_unhealthy() {
-        let s = ServiceState::Unhealthy { pid: 99, failures: 3 };
+        let s = ServiceState::Unhealthy {
+            pid: 99,
+            failures: 3,
+        };
         assert_eq!(s.pid(), Some(99));
     }
 

@@ -150,10 +150,26 @@ fn scaffold_python(dir: &Path, env: &Environment, ctx: minijinja::Value) -> Resu
         env.get_template(name)
             .map_err(|e| DevError::Config(format!("template '{name}': {e}")))
     };
-    render_file(dir, "config.hcl", get("python/config.hcl")?.render(ctx.clone())?)?;
-    render_file(dir, "skills/hello.py", get("python/skills/hello.py")?.render(ctx.clone())?)?;
-    render_file(dir, "agents/demo.py", get("python/agents/demo.py")?.render(ctx.clone())?)?;
-    render_file(dir, "requirements.txt", get("python/requirements.txt")?.render(ctx)?)?;
+    render_file(
+        dir,
+        "config.hcl",
+        get("python/config.hcl")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "skills/hello.py",
+        get("python/skills/hello.py")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "agents/demo.py",
+        get("python/agents/demo.py")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "requirements.txt",
+        get("python/requirements.txt")?.render(ctx)?,
+    )?;
     Ok(())
 }
 
@@ -164,11 +180,31 @@ fn scaffold_typescript(dir: &Path, env: &Environment, ctx: minijinja::Value) -> 
         env.get_template(name)
             .map_err(|e| DevError::Config(format!("template '{name}': {e}")))
     };
-    render_file(dir, "config.hcl", get("typescript/config.hcl")?.render(ctx.clone())?)?;
-    render_file(dir, "skills/hello.ts", get("typescript/skills/hello.ts")?.render(ctx.clone())?)?;
-    render_file(dir, "agents/demo.ts", get("typescript/agents/demo.ts")?.render(ctx.clone())?)?;
-    render_file(dir, "package.json", get("typescript/package.json")?.render(ctx.clone())?)?;
-    render_file(dir, "tsconfig.json", get("typescript/tsconfig.json")?.render(ctx)?)?;
+    render_file(
+        dir,
+        "config.hcl",
+        get("typescript/config.hcl")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "skills/hello.ts",
+        get("typescript/skills/hello.ts")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "agents/demo.ts",
+        get("typescript/agents/demo.ts")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "package.json",
+        get("typescript/package.json")?.render(ctx.clone())?,
+    )?;
+    render_file(
+        dir,
+        "tsconfig.json",
+        get("typescript/tsconfig.json")?.render(ctx)?,
+    )?;
     Ok(())
 }
 

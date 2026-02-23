@@ -547,7 +547,11 @@ async fn run(cli: Cli) -> Result<()> {
                     "0.0.0"
                 };
                 if *binary != "a3s" && !which_binary(binary) {
-                    println!("  {} {} not installed, skipping", "·".dimmed(), binary.dimmed());
+                    println!(
+                        "  {} {} not installed, skipping",
+                        "·".dimmed(),
+                        binary.dimmed()
+                    );
                     continue;
                 }
                 println!("{} updating {}...", "→".cyan(), binary.cyan());

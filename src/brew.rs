@@ -420,7 +420,16 @@ mod tests {
     fn test_tar_flag_gz() {
         use std::path::Path;
         let p = Path::new("pkg-1.0.tar.gz");
-        let flag = if p.extension().and_then(|e| e.to_str()).map(|e| e == "xz").unwrap_or(false) { "-xJf" } else { "-xzf" };
+        let flag = if p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e == "xz")
+            .unwrap_or(false)
+        {
+            "-xJf"
+        } else {
+            "-xzf"
+        };
         assert_eq!(flag, "-xzf");
     }
 
@@ -428,7 +437,16 @@ mod tests {
     fn test_tar_flag_xz() {
         use std::path::Path;
         let p = Path::new("pkg-1.0.tar.xz");
-        let flag = if p.extension().and_then(|e| e.to_str()).map(|e| e == "xz").unwrap_or(false) { "-xJf" } else { "-xzf" };
+        let flag = if p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e == "xz")
+            .unwrap_or(false)
+        {
+            "-xJf"
+        } else {
+            "-xzf"
+        };
         assert_eq!(flag, "-xJf");
     }
 
@@ -436,7 +454,16 @@ mod tests {
     fn test_tar_flag_no_extension() {
         use std::path::Path;
         let p = Path::new("pkg");
-        let flag = if p.extension().and_then(|e| e.to_str()).map(|e| e == "xz").unwrap_or(false) { "-xJf" } else { "-xzf" };
+        let flag = if p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e == "xz")
+            .unwrap_or(false)
+        {
+            "-xJf"
+        } else {
+            "-xzf"
+        };
         assert_eq!(flag, "-xzf");
     }
 }

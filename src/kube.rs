@@ -41,7 +41,10 @@ pub async fn status() -> Result<()> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        println!("  {} kube status is only supported on macOS and Linux", "·".dimmed());
+        println!(
+            "  {} kube status is only supported on macOS and Linux",
+            "·".dimmed()
+        );
         Ok(())
     }
 }
@@ -289,7 +292,10 @@ async fn run(program: &str, args: &[&str]) -> Result<()> {
         return Err(DevError::Config(format!(
             "`{program} {}` exited with {}",
             args.join(" "),
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
         )));
     }
     Ok(())
