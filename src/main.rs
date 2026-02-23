@@ -29,6 +29,7 @@ use supervisor::Supervisor;
 #[derive(Parser)]
 #[command(
     name = "a3s",
+    version,
     about = "a3s — local development orchestration for the A3S monorepo",
     allow_external_subcommands = true
 )]
