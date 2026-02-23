@@ -69,19 +69,32 @@ async fn start_macos() -> Result<()> {
     let existing = String::from_utf8_lossy(&list.stdout);
 
     if existing.lines().any(|l| l.trim() == "k3s") {
-        println!("  {} k3s VM already exists — starting...", "→".cyan());
-        run("limactl", &["start", "k3s"]).await?;
+        println!(
+            "  {} k3s VM already exists — starting in background...",
+            "→".cyan()
+        );
     } else {
-        println!("  {} creating k3s Lima VM...", "→".cyan());
-        run("limactl", &["start", "--name=k3s", "template://k3s"]).await?;
+        println!("  {} creating k3s Lima VM in background...", "→".cyan());
     }
 
-    merge_kubeconfig_macos().await?;
+    // Spawn limactl detached so the command returns immediately.
+    let args: &[&str] = if existing.lines().any(|l| l.trim() == "k3s") {
+        &["start", "k3s"]
+    } else {
+        &["start", "--name=k3s", "template://k3s"]
+    };
+    tokio::process::Command::new("limactl")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| DevError::Config(format!("failed to spawn limactl: {e}")))?;
 
     println!(
-        "  {} k3s is running. Use {} to interact with the cluster.",
+        "  {} k3s starting in background. Run {} to check status.",
         "✓".green(),
-        "kubectl".cyan()
+        "a3s kube status".cyan()
     );
     Ok(())
 }
