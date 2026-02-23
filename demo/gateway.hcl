@@ -11,7 +11,7 @@ services "whoami-backend" {
   load_balancer {
     strategy = "round-robin"
     servers = [
-      { url = "http://whoami:80" }
+      { url = "http://127.0.0.1:8000" }
     ]
   }
 }
