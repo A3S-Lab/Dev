@@ -99,6 +99,8 @@ enum Commands {
     Install,
     /// List all installed a3s ecosystem tools and brew packages
     List,
+    /// Update all installed a3s ecosystem tools to the latest version
+    Update,
     /// a3s-code agent scaffolding
     Code {
         #[command(subcommand)]
@@ -509,6 +511,45 @@ async fn run(cli: Cli) -> Result<()> {
                         println!("  {:<20} {}", pkg.cyan(), status);
                     }
                 }
+            }
+        }
+
+        Commands::Update => {
+            let tools = [
+                ("box", "a3s-box", "A3S-Lab", "Box"),
+                ("gateway", "a3s-gateway", "A3S-Lab", "Gateway"),
+                ("power", "a3s-power", "A3S-Lab", "Power"),
+            ];
+            for (_, binary, owner, repo) in &tools {
+                if which_binary(binary) {
+                    println!("{} updating {}...", "→".cyan(), binary.cyan());
+                    let config = a3s_updater::UpdateConfig {
+                        binary_name: binary,
+                        crate_name: binary,
+                        current_version: "0.0.0",
+                        github_owner: owner,
+                        github_repo: repo,
+                    };
+                    match a3s_updater::run_update(&config).await {
+                        Ok(_) => println!("{} {} updated", "✓".green(), binary.cyan()),
+                        Err(e) => println!("{} {} — {}", "✗".red(), binary.cyan(), e),
+                    }
+                } else {
+                    println!("  {} {} not installed, skipping", "·".dimmed(), binary.dimmed());
+                }
+            }
+            // Also update a3s itself
+            println!("{} updating a3s...", "→".cyan());
+            let config = a3s_updater::UpdateConfig {
+                binary_name: "a3s",
+                crate_name: "a3s",
+                current_version: env!("CARGO_PKG_VERSION"),
+                github_owner: "A3S-Lab",
+                github_repo: "Dev",
+            };
+            match a3s_updater::run_update(&config).await {
+                Ok(_) => println!("{} a3s updated", "✓".green()),
+                Err(e) => println!("{} a3s — {}", "✗".red(), e),
             }
         }
 
