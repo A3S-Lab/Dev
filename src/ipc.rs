@@ -44,6 +44,7 @@ pub struct StatusRow {
     pub port: u16,
     pub subdomain: Option<String>,
     pub uptime_secs: Option<u64>,
+    pub proxy_port: u16,
 }
 
 #[cfg(test)]

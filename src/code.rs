@@ -99,17 +99,29 @@ where
     use std::mem::MaybeUninit;
 
     let mut orig = MaybeUninit::uninit();
+
+    // SAFETY: tcgetattr writes into `orig` on success (returns 0).
+    // We verify the return value before calling assume_init to avoid UB.
+    let ret = unsafe { libc::tcgetattr(0, orig.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(DevError::Config(
+            "tcgetattr failed: cannot enter raw mode".into(),
+        ));
+    }
+    // SAFETY: tcgetattr returned 0, so `orig` is fully initialised.
+    let orig_term = unsafe { orig.assume_init() };
+
     unsafe {
-        libc::tcgetattr(0, orig.as_mut_ptr());
-        let mut raw = orig.assume_init();
+        let mut raw = orig_term;
         libc::cfmakeraw(&mut raw);
         libc::tcsetattr(0, libc::TCSANOW, &raw);
     }
 
     let result = f();
 
+    // Always restore the original terminal settings, even on error.
     unsafe {
-        libc::tcsetattr(0, libc::TCSANOW, orig.as_ptr());
+        libc::tcsetattr(0, libc::TCSANOW, &orig_term);
     }
 
     result

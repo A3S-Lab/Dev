@@ -10,6 +10,8 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
+use crate::box_mgr;
+use crate::kube;
 use crate::supervisor::Supervisor;
 
 pub const DEFAULT_UI_PORT: u16 = 10350;
@@ -125,6 +127,159 @@ async fn handle(
             sup.stop_service(&name).await;
             full_response("application/json", b"{\"ok\":true}".to_vec())
         }
+        (Method::GET, "/api/kube/status") => {
+            let status = kube::query_status().await;
+            let body = serde_json::to_vec(&status).unwrap_or_default();
+            full_response("application/json", body)
+        }
+        (Method::GET, "/api/kube/resources") => {
+            let ns = query
+                .split('&')
+                .find(|p| p.starts_with("ns="))
+                .map(|p| urldecode(&p["ns=".len()..]));
+            match kube::query_resources(ns.as_deref()).await {
+                Ok(res) => {
+                    let body = serde_json::to_vec(&res).unwrap_or_default();
+                    full_response("application/json", body)
+                }
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{e}\"}}").into_bytes();
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(body)).map_err(|e| e).boxed())
+                        .unwrap()
+                }
+            }
+        }
+        (Method::GET, p) if p.starts_with("/api/kube/logs/") => {
+            // /api/kube/logs/<namespace>/<pod>?tail=200
+            let rest = &p["/api/kube/logs/".len()..];
+            let (ns, name) = rest.split_once('/').unwrap_or(("default", rest));
+            let (ns, name) = (urldecode(ns), urldecode(name));
+            let tail: usize = query
+                .split('&')
+                .find(|p| p.starts_with("tail="))
+                .and_then(|p| p["tail=".len()..].parse().ok())
+                .unwrap_or(200);
+            match kube::pod_logs(&ns, &name, tail).await {
+                Ok(logs) => full_response("text/plain; charset=utf-8", logs.into_bytes()),
+                Err(e) => {
+                    let body = format!("error: {e}").into_bytes();
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header("content-type", "text/plain")
+                        .body(Full::new(Bytes::from(body)).map_err(|e| e).boxed())
+                        .unwrap()
+                }
+            }
+        }
+        (Method::DELETE, p) if p.starts_with("/api/kube/pod/") => {
+            // /api/kube/pod/<namespace>/<name>
+            let rest = &p["/api/kube/pod/".len()..];
+            let (ns, name) = rest.split_once('/').unwrap_or(("default", rest));
+            let (ns, name) = (urldecode(ns), urldecode(name));
+            match kube::delete_pod(&ns, &name).await {
+                Ok(_) => full_response("application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{e}\"}}").into_bytes();
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(body)).map_err(|e| e).boxed())
+                        .unwrap()
+                }
+            }
+        }
+        (Method::POST, "/api/kube/start") => {
+            tokio::spawn(async { let _ = kube::start().await; });
+            full_response("application/json", b"{\"ok\":true}".to_vec())
+        }
+        (Method::POST, "/api/kube/stop") => {
+            tokio::spawn(async { let _ = kube::stop().await; });
+            full_response("application/json", b"{\"ok\":true}".to_vec())
+        }
+        // ── Box API ──────────────────────────────────────────────────────────
+        (Method::GET, "/api/box/containers") => {
+            let all = query.contains("all=true");
+            match box_mgr::list_containers(all).await {
+                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::GET, "/api/box/images") => {
+            match box_mgr::list_images().await {
+                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::GET, "/api/box/networks") => {
+            match box_mgr::list_networks().await {
+                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::GET, "/api/box/volumes") => {
+            match box_mgr::list_volumes().await {
+                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::GET, "/api/box/info") => {
+            match box_mgr::get_info().await {
+                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::GET, p) if p.starts_with("/api/box/logs/") => {
+            let id = urldecode(&p["/api/box/logs/".len()..]);
+            let tail: usize = query.split('&').find(|p| p.starts_with("tail="))
+                .and_then(|p| p["tail=".len()..].parse().ok()).unwrap_or(200);
+            match box_mgr::container_logs(&id, tail).await {
+                Ok(v) => full_response("text/plain; charset=utf-8", v.into_bytes()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::POST, p) if p.starts_with("/api/box/stop/") => {
+            let id = urldecode(&p["/api/box/stop/".len()..]);
+            match box_mgr::stop_container(&id).await {
+                Ok(_) => full_response("application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::DELETE, p) if p.starts_with("/api/box/container/") => {
+            let id = urldecode(&p["/api/box/container/".len()..]);
+            match box_mgr::remove_container(&id).await {
+                Ok(_) => full_response("application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::DELETE, p) if p.starts_with("/api/box/image/") => {
+            let r = urldecode(&p["/api/box/image/".len()..]);
+            match box_mgr::remove_image(&r).await {
+                Ok(_) => full_response("application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::DELETE, p) if p.starts_with("/api/box/network/") => {
+            let n = urldecode(&p["/api/box/network/".len()..]);
+            match box_mgr::remove_network(&n).await {
+                Ok(_) => full_response("application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::DELETE, p) if p.starts_with("/api/box/volume/") => {
+            let n = urldecode(&p["/api/box/volume/".len()..]);
+            match box_mgr::remove_volume(&n).await {
+                Ok(_) => full_response("application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => error_response(&e.to_string()),
+            }
+        }
+        (Method::POST, p) if p.starts_with("/api/box/pull/") => {
+            let r = urldecode(&p["/api/box/pull/".len()..]);
+            tokio::spawn(async move { let _ = box_mgr::pull_image(&r).await; });
+            full_response("application/json", b"{\"ok\":true}".to_vec())
+        }
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(
@@ -141,6 +296,16 @@ async fn handle(
 fn full_response(content_type: &str, body: Vec<u8>) -> BoxResp {
     Response::builder()
         .header("content-type", content_type)
+        .header("access-control-allow-origin", "*")
+        .body(Full::new(Bytes::from(body)).map_err(|e| e).boxed())
+        .unwrap()
+}
+
+fn error_response(msg: &str) -> BoxResp {
+    let body = format!("{{\"error\":\"{}\"}}", msg.replace('"', "'")).into_bytes();
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header("content-type", "application/json")
         .header("access-control-allow-origin", "*")
         .body(Full::new(Bytes::from(body)).map_err(|e| e).boxed())
         .unwrap()
@@ -166,7 +331,8 @@ fn urldecode(s: &str) -> String {
     out
 }
 
-static INDEX_HTML: &str = include_str!("ui.html");
+// Built by `just build-ui` (rsbuild). Run that command before `cargo build`.
+static INDEX_HTML: &str = include_str!("ui/dist/index.html");
 
 #[cfg(test)]
 mod tests {

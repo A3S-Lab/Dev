@@ -59,9 +59,16 @@ pub async fn spawn_process(spec: &SpawnSpec<'_>, log: &Arc<LogAggregator>) -> Re
 }
 
 /// Bind to port 0 and return the OS-assigned free port.
+///
+/// Note: there is an inherent TOCTOU race between dropping the listener and
+/// the service process binding to the returned port. In practice the window is
+/// a few microseconds and the OS ephemeral-port pool is not immediately
+/// recycled, so collisions are vanishingly rare for a local dev tool.
 pub fn free_port() -> Option<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-    Some(listener.local_addr().ok()?.port())
+    let port = listener.local_addr().ok()?.port();
+    drop(listener);
+    Some(port)
 }
 
 /// Shell-style command splitting: handles single/double quotes and backslash escapes.

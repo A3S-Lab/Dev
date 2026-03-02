@@ -78,6 +78,10 @@ impl Supervisor {
         let graph = DependencyGraph::from_config(&self.config)?;
         let names: Vec<String> = graph.start_order().to_vec();
         for (idx, name) in names.iter().enumerate() {
+            if self.config.service.get(name).is_some_and(|s| s.disabled) {
+                tracing::info!("[{name}] skipped (disabled)");
+                continue;
+            }
             self.start_service(name, idx).await?;
         }
         Ok(())
@@ -248,6 +252,7 @@ impl Supervisor {
                     port: handle.map(|h| h.port).unwrap_or(svc.port),
                     subdomain: svc.subdomain.clone(),
                     uptime_secs,
+                    proxy_port: self.config.dev.proxy_port,
                 }
             })
             .collect()
@@ -278,17 +283,29 @@ impl Supervisor {
             let mut restart_count = 0u32;
 
             loop {
-                // Wait for the process to exit
-                let exit_status = {
+                // Wait for the process to exit — take the child out first so we
+                // don't hold the write lock across an async wait.
+                let child_done = {
                     let mut map = handles.write().await;
                     if let Some(h) = map.get_mut(&svc_name) {
                         if !matches!(h.state, ServiceState::Running { .. }) {
                             break;
                         }
-                        h.child.wait().await.ok()
+                        // Replace child with a dummy so we can await outside the lock.
+                        // Safety: we immediately await the real child below.
+                        Some(std::mem::replace(
+                            &mut h.child,
+                            tokio::process::Command::new("true").spawn().unwrap(),
+                        ))
                     } else {
                         break;
                     }
+                };
+
+                let exit_status = if let Some(mut child) = child_done {
+                    child.wait().await.ok()
+                } else {
+                    break;
                 };
 
                 // Check if we were intentionally stopped

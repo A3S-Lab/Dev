@@ -1,5 +1,7 @@
 /target
 Cargo.lock
+src/ui/node_modules
+src/ui/dist
 *.sock
 .env
 .env.*

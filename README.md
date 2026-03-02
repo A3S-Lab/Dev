@@ -99,6 +99,9 @@ service "api" {
 | `a3s restart <service>` | Restart a service |
 | `a3s status` | Show service status table |
 | `a3s logs [--service name]` | Tail logs (all or one service) |
+| `a3s run <cmd>` | Run a one-off command with env from A3sfile.hcl |
+| `a3s run --service <name> <cmd>` | Run with env from a specific service |
+| `a3s exec <service> -- <cmd>` | Run a command in a service's environment |
 | `a3s validate` | Validate A3sfile.hcl without starting anything |
 | `a3s init` | Generate a new A3sfile.hcl |
 
@@ -172,10 +175,13 @@ service "<name>" {
   port       = 3000      # Port the service listens on (0 = auto-detect)
   subdomain  = "api"     # Proxy subdomain (optional)
   depends_on = ["db"]    # Services to start first (optional)
+  disabled   = false     # Set to true to skip this service entirely (optional)
 
-  env = {                # Environment variables (optional)
+  env = {                # Environment variables (optional, override env_file)
     KEY = "value"
   }
+
+  env_file = ".env"      # Load variables from a .env file (optional)
 
   watch {                # File watcher — restart on change (optional)
     paths   = ["./src"]

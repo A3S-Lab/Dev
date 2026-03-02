@@ -3,246 +3,672 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>a3s dev</title>
+<title>a3s</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #1a1a2e; --sidebar: #16213e; --header: #0f3460;
-    --accent: #e94560; --green: #4caf50; --yellow: #ffc107;
-    --red: #f44336; --blue: #2196f3; --dim: #6b7280;
-    --text: #e2e8f0; --text-dim: #94a3b8; --border: #2d3748;
-    --log-bg: #0d1117; --row-hover: #1e293b; --selected: #1e3a5f;
-  }
-  body { font-family: 'SF Mono','Fira Code','Cascadia Code',monospace; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; font-size: 13px; }
-  header { background: var(--header); padding: 0 16px; height: 40px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  header .logo { font-weight: 700; font-size: 15px; color: var(--accent); letter-spacing: 1px; }
-  header .subtitle { color: var(--text-dim); font-size: 11px; }
-  header .spacer { flex: 1; }
-  header .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-  header .uptime { color: var(--text-dim); font-size: 11px; }
-  .main { display: flex; flex: 1; overflow: hidden; }
-  .sidebar { width: 300px; min-width: 200px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
-  .sidebar-header { padding: 8px 12px; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: var(--text-dim); text-transform: uppercase; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
-  .sidebar-header .count { background: var(--border); border-radius: 10px; padding: 1px 6px; font-size: 10px; color: var(--text-dim); }
-  .service-list { flex: 1; overflow-y: auto; }
-  .service-list::-webkit-scrollbar { width: 4px; }
-  .service-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-  .service-row { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid rgba(45,55,72,.5); display: flex; flex-direction: column; gap: 4px; transition: background .1s; position: relative; }
-  .service-row:hover { background: var(--row-hover); }
-  .service-row.selected { background: var(--selected); }
-  .service-row.selected::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--accent); }
-  .row-top { display: flex; align-items: center; gap: 8px; }
-  .state-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .state-dot.running { background: var(--green); }
-  .state-dot.starting,.state-dot.restarting { background: var(--yellow); animation: pulse 1s infinite; }
-  .state-dot.stopped { background: var(--dim); }
-  .state-dot.failed,.state-dot.unhealthy { background: var(--red); }
-  .state-dot.pending { background: var(--blue); }
-  .svc-name { font-weight: 600; font-size: 13px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .svc-state { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
-  .svc-state.running { background: rgba(76,175,80,.15); color: var(--green); }
-  .svc-state.starting,.svc-state.restarting { background: rgba(255,193,7,.15); color: var(--yellow); }
-  .svc-state.stopped { background: rgba(107,114,128,.15); color: var(--dim); }
-  .svc-state.failed,.svc-state.unhealthy { background: rgba(244,67,54,.15); color: var(--red); }
-  .svc-state.pending { background: rgba(33,150,243,.15); color: var(--blue); }
-  .row-meta { display: flex; gap: 12px; padding-left: 16px; flex-wrap: wrap; }
-  .meta-item { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 3px; }
-  .meta-item a { color: var(--blue); text-decoration: none; }
-  .meta-item a:hover { text-decoration: underline; }
-  .row-actions { display: none; gap: 4px; padding-left: 16px; margin-top: 2px; }
-  .service-row:hover .row-actions,.service-row.selected .row-actions { display: flex; }
-  .btn { font-size: 10px; padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all .1s; }
-  .btn:hover { background: var(--border); color: var(--text); }
-  .btn.restart:hover { border-color: var(--yellow); color: var(--yellow); }
-  .btn.stop:hover { border-color: var(--red); color: var(--red); }
-  .log-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--log-bg); }
-  .log-header { padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; flex-shrink: 0; background: var(--sidebar); }
-  .log-title { font-weight: 600; font-size: 13px; }
-  .log-title .svc-label { color: var(--accent); }
-  .log-header .spacer { flex: 1; }
-  .log-header .hint { font-size: 10px; color: var(--dim); }
-  .log-output { flex: 1; overflow-y: auto; padding: 8px 16px; font-size: 12px; line-height: 1.6; }
-  .log-output::-webkit-scrollbar { width: 6px; }
-  .log-output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  .log-line { display: flex; gap: 8px; padding: 1px 0; }
-  .log-line:hover { background: rgba(255,255,255,.03); }
-  .log-ts { color: var(--dim); flex-shrink: 0; font-size: 11px; user-select: none; }
-  .log-svc { flex-shrink: 0; font-size: 11px; font-weight: 600; min-width: 80px; }
-  .log-text { color: var(--text); white-space: pre-wrap; word-break: break-all; }
-  .log-empty { color: var(--dim); padding: 32px; text-align: center; font-size: 12px; }
-  footer { height: 22px; background: var(--header); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 12px; gap: 16px; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
-  footer .ok { color: var(--green); }
-  footer .warn { color: var(--yellow); }
-  footer .err { color: var(--red); }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #0e0e0e;
+  --bg-2:        #141414;
+  --bg-3:        #1a1a1a;
+  --bg-4:        #202020;
+  --line:        #2a2a2a;
+  --line-subtle: #1e1e1e;
+  --text:        #e8e8e8;
+  --text-2:      #888;
+  --text-3:      #444;
+  --green:       #4ade80;
+  --yellow:      #fbbf24;
+  --red:         #f87171;
+  --blue:        #60a5fa;
+  --cyan:        #22d3ee;
+  --mono:        'IBM Plex Mono', 'SF Mono', ui-monospace, monospace;
+  --sans:        'IBM Plex Sans', system-ui, sans-serif;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Layout ─────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-rows: 40px 1fr 24px;
+  grid-template-columns: 260px 1fr;
+  height: 100vh;
+}
+
+/* ── Topbar ──────────────────────────────────────────────────── */
+
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+}
+
+.wordmark {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  padding-right: 16px;
+  border-right: 1px solid var(--line);
+  margin-right: 16px;
+}
+
+.wordmark em {
+  color: var(--cyan);
+  font-style: normal;
+}
+
+.topbar-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+.topbar-spacer { flex: 1; }
+
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.conn-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green);
+  transition: background 0.3s;
+}
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+.conn-dot.live { animation: blink 2.4s ease-in-out infinite; }
+.conn-dot.dead { background: var(--red); animation: none; }
+
+/* ── Sidebar ─────────────────────────────────────────────────── */
+
+.sidebar {
+  background: var(--bg-2);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-head {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--line-subtle);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sidebar-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.svc-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.svc-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.svc-list::-webkit-scrollbar { width: 2px; }
+.svc-list::-webkit-scrollbar-thumb { background: var(--line); }
+.svc-list::-webkit-scrollbar-track { background: transparent; }
+
+.svc-item {
+  padding: 8px 14px;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.1s;
+  border-left: 2px solid transparent;
+}
+
+.svc-item:hover { background: var(--bg-3); }
+
+.svc-item.active {
+  background: var(--bg-3);
+  border-left-color: var(--cyan);
+}
+
+.svc-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.svc-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.svc-indicator.running    { background: var(--green); }
+.svc-indicator.starting,
+.svc-indicator.restarting { background: var(--yellow); animation: blink 0.6s infinite; }
+.svc-indicator.stopped    { background: var(--text-3); }
+.svc-indicator.failed,
+.svc-indicator.unhealthy  { background: var(--red); }
+.svc-indicator.pending    { background: var(--blue); }
+
+.svc-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.svc-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.svc-badge.running    { color: var(--green);  background: rgba(74,222,128,0.08);  }
+.svc-badge.starting,
+.svc-badge.restarting { color: var(--yellow); background: rgba(251,191,36,0.08);  }
+.svc-badge.stopped    { color: var(--text-3); background: rgba(68,68,68,0.2);     }
+.svc-badge.failed,
+.svc-badge.unhealthy  { color: var(--red);    background: rgba(248,113,113,0.08); }
+.svc-badge.pending    { color: var(--blue);   background: rgba(96,165,250,0.08);  }
+
+.svc-meta {
+  display: flex;
+  gap: 10px;
+  padding-left: 14px;
+}
+
+.svc-meta-item {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.svc-meta-item a {
+  color: var(--text-2);
+  text-decoration: none;
+}
+.svc-meta-item a:hover { color: var(--cyan); }
+
+.svc-actions {
+  display: none;
+  gap: 4px;
+  padding-left: 14px;
+  margin-top: 5px;
+}
+
+.svc-item:hover .svc-actions,
+.svc-item.active .svc-actions { display: flex; }
+
+.act-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 0.12s;
+  letter-spacing: 0.02em;
+}
+
+.act-btn:hover { color: var(--text); border-color: var(--text-3); }
+.act-btn.restart:hover { color: var(--yellow); border-color: rgba(251,191,36,0.4); background: rgba(251,191,36,0.05); }
+.act-btn.stop:hover    { color: var(--red);    border-color: rgba(248,113,113,0.4); background: rgba(248,113,113,0.05); }
+
+/* ── Log panel ───────────────────────────────────────────────── */
+
+.log-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.log-head {
+  height: 36px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  background: var(--bg-2);
+}
+
+.log-scope {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.log-scope strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.log-head-spacer { flex: 1; }
+
+.btn-all {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 0.12s;
+  letter-spacing: 0.04em;
+}
+
+.btn-all:hover,
+.btn-all.on {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--bg-3);
+}
+
+.scroll-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  transition: opacity 0.2s;
+  user-select: none;
+}
+
+.log-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.75;
+}
+
+.log-body::-webkit-scrollbar { width: 3px; }
+.log-body::-webkit-scrollbar-thumb { background: var(--bg-4); }
+.log-body::-webkit-scrollbar-track { background: transparent; }
+
+.log-row {
+  display: flex;
+  padding: 0 16px;
+  gap: 0;
+  transition: background 0.05s;
+}
+
+.log-row:hover { background: rgba(255,255,255,0.015); }
+
+.log-time {
+  color: var(--text-3);
+  flex-shrink: 0;
+  min-width: 64px;
+  padding-right: 10px;
+  user-select: none;
+  font-size: 10.5px;
+  opacity: 0.6;
+}
+
+.log-tag {
+  flex-shrink: 0;
+  min-width: 100px;
+  padding-right: 12px;
+  font-size: 10.5px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.log-msg {
+  color: #c0c0c0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  flex: 1;
+  font-size: 11.5px;
+}
+
+.log-empty {
+  padding: 60px 20px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+/* ── Statusbar ───────────────────────────────────────────────── */
+
+.statusbar {
+  grid-column: 1 / -1;
+  background: var(--bg-2);
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border-right: 1px solid var(--line-subtle);
+  height: 100%;
+}
+
+.stat-item:first-child { padding-left: 0; }
+
+.stat-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+}
+
+.stat-dot.g { background: var(--green); }
+.stat-dot.y { background: var(--yellow); }
+.stat-dot.r { background: var(--red); }
+
+.stat-val.g { color: var(--green); }
+.stat-val.y { color: var(--yellow); }
+.stat-val.r { color: var(--red); }
+
+.stat-spacer { flex: 1; }
+
+.stat-url {
+  color: var(--text-3);
+  font-size: 10px;
+  opacity: 0.5;
+}
 </style>
 </head>
 <body>
-<header>
-  <span class="logo">a3s</span>
-  <span class="subtitle">dev orchestration</span>
-  <div class="spacer"></div>
-  <div class="status-dot" id="conn-dot"></div>
-  <span class="uptime" id="uptime-label">connecting...</span>
-</header>
-<div class="main">
-  <div class="sidebar">
-    <div class="sidebar-header">Services <span class="count" id="svc-count">0</span></div>
-    <div class="service-list" id="service-list"></div>
-  </div>
-  <div class="log-panel">
-    <div class="log-header">
-      <span class="log-title">Logs — <span class="svc-label" id="log-title">all services</span></span>
-      <div class="spacer"></div>
-      <button class="btn active" id="btn-all" onclick="selectService(null)">All</button>
-      <span class="hint" id="autoscroll-hint">↓ auto</span>
+
+<div class="shell">
+
+  <!-- Topbar -->
+  <header class="topbar">
+    <span class="wordmark"><em>a3s</em></span>
+    <span class="topbar-meta" id="topbar-meta">dev orchestrator</span>
+    <div class="topbar-spacer"></div>
+    <div class="conn-status">
+      <div class="conn-dot live" id="conn-dot"></div>
+      <span id="conn-label">connecting</span>
     </div>
-    <div class="log-output" id="log-output"><div class="log-empty">Waiting for logs...</div></div>
-  </div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span class="sidebar-label">Services</span>
+      <span class="svc-count" id="svc-count">—</span>
+    </div>
+    <div class="svc-list" id="svc-list"></div>
+  </aside>
+
+  <!-- Log panel -->
+  <main class="log-panel">
+    <div class="log-head">
+      <span class="log-scope">logs / <strong id="log-scope-label">all</strong></span>
+      <div class="log-head-spacer"></div>
+      <button class="btn-all on" id="btn-all" onclick="selectSvc(null)">all</button>
+      <span class="scroll-hint" id="scroll-hint">↓ auto</span>
+    </div>
+    <div class="log-body" id="log-body">
+      <div class="log-empty">waiting for output…</div>
+    </div>
+  </main>
+
+  <!-- Statusbar -->
+  <footer class="statusbar">
+    <div class="stat-item">
+      <span class="stat-dot g"></span>
+      <span class="stat-val g" id="stat-run">0</span>
+      <span>running</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-dot y"></span>
+      <span class="stat-val y" id="stat-stp">0</span>
+      <span>stopped</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-dot r"></span>
+      <span class="stat-val r" id="stat-err">0</span>
+      <span>failed</span>
+    </div>
+    <div class="stat-spacer"></div>
+    <span class="stat-url" id="stat-url"></span>
+  </footer>
+
 </div>
-<footer>
-  <span id="footer-running" class="ok">0 running</span>
-  <span id="footer-stopped" class="warn">0 stopped</span>
-  <span id="footer-failed" class="err">0 failed</span>
-  <div style="flex:1"></div>
-  <span id="footer-url"></span>
-</footer>
+
 <script>
 const MAX_LINES = 2000;
-const POLL_MS = 1500;
-let selected = null, logLines = [], autoScroll = true, startTime = Date.now();
-const COLORS = ['#60a5fa','#34d399','#fbbf24','#f472b6','#a78bfa','#38bdf8','#4ade80','#fb923c'];
-const colorMap = {}; let ci = 0;
-function color(n) { if (!colorMap[n]) colorMap[n] = COLORS[ci++ % COLORS.length]; return colorMap[n]; }
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function fmt(s) {
-  s = esc(s);
-  // ANSI color stripping (basic)
-  s = s.replace(/\x1b\[[0-9;]*m/g,'');
-  return s;
-}
-function uptime(s) {
-  s = Math.floor(s);
-  if (s < 60) return s+'s';
-  if (s < 3600) return Math.floor(s/60)+'m'+(s%60)+'s';
-  return Math.floor(s/3600)+'h'+Math.floor((s%3600)/60)+'m';
+const POLL_MS   = 1500;
+
+let selected   = null;
+let logLines   = [];
+let autoScroll = true;
+let startMs    = Date.now();
+let evtSrc     = null;
+
+// ── Color assignment ──────────────────────────────────────────
+const PALETTE = [
+  '#22d3ee','#4ade80','#fbbf24','#f472b6',
+  '#a78bfa','#60a5fa','#34d399','#fb923c',
+];
+const colorMap = {};
+let ci = 0;
+function svcColor(n) {
+  if (!colorMap[n]) colorMap[n] = PALETTE[ci++ % PALETTE.length];
+  return colorMap[n];
 }
 
-// ── Status polling ────────────────────────────────────────────────────────────
+// ── Utilities ─────────────────────────────────────────────────
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function stripAnsi(s) {
+  return s.replace(/\x1b\[[0-9;]*[mGKHF]/g, '');
+}
+function fmtUptime(s) {
+  s = Math.floor(s);
+  if (s < 60)   return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h' + Math.floor((s%3600)/60) + 'm';
+}
+function nowTime() {
+  return new Date().toLocaleTimeString('en', { hour12: false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+
+// ── Status polling ────────────────────────────────────────────
 async function poll() {
   try {
-    const r = await fetch('/api/status');
-    const rows = await r.json();
-    renderServices(rows);
-    document.getElementById('conn-dot').style.background = 'var(--green)';
-    document.getElementById('uptime-label').textContent = uptime((Date.now()-startTime)/1000);
-  } catch(e) {
-    document.getElementById('conn-dot').style.background = 'var(--red)';
-    document.getElementById('uptime-label').textContent = 'disconnected';
+    const rows = await fetch('/api/status').then(r => r.json());
+    renderSidebar(rows);
+    const dot = document.getElementById('conn-dot');
+    dot.className = 'conn-dot live';
+    const elapsed = Math.floor((Date.now() - startMs) / 1000);
+    document.getElementById('conn-label').textContent = fmtUptime(elapsed);
+  } catch {
+    const dot = document.getElementById('conn-dot');
+    dot.className = 'conn-dot dead';
+    document.getElementById('conn-label').textContent = 'offline';
   }
 }
 
-function renderServices(rows) {
+function renderSidebar(rows) {
   document.getElementById('svc-count').textContent = rows.length;
-  const list = document.getElementById('service-list');
+  const list = document.getElementById('svc-list');
   list.innerHTML = '';
+
   rows.forEach(row => {
     const el = document.createElement('div');
-    el.className = 'service-row' + (selected === row.name ? ' selected' : '');
+    el.className = 'svc-item' + (selected === row.name ? ' active' : '');
     el.dataset.name = row.name;
-    el.onclick = () => selectService(row.name);
-    const c = color(row.name);
-    const url = row.subdomain ? `http://${row.subdomain}.localhost` : `http://localhost:${row.port}`;
+    el.onclick = () => selectSvc(row.name);
+
+    const c   = svcColor(row.name);
+    const url = row.subdomain
+      ? `http://${row.subdomain}.localhost`
+      : `http://localhost:${row.port}`;
+    const portStr = row.port ? `:${row.port}` : '';
+    const upStr   = row.uptime_secs != null ? fmtUptime(row.uptime_secs) : '—';
+
     el.innerHTML = `
-      <div class="row-top">
-        <div class="state-dot ${row.state}"></div>
+      <div class="svc-top">
+        <div class="svc-indicator ${row.state}"></div>
         <span class="svc-name" style="color:${c}">${row.name}</span>
-        <span class="svc-state ${row.state}">${row.state}</span>
+        <span class="svc-badge ${row.state}">${row.state}</span>
       </div>
-      <div class="row-meta">
-        <span class="meta-item">:${row.port}</span>
-        <span class="meta-item"><a href="${url}" target="_blank">${url}</a></span>
-        ${row.pid ? `<span class="meta-item">pid ${row.pid}</span>` : ''}
-        <span class="meta-item">↑ ${row.uptime_secs != null ? uptime(row.uptime_secs) : '-'}</span>
+      <div class="svc-meta">
+        ${portStr ? `<span class="svc-meta-item">${portStr}</span>` : ''}
+        <span class="svc-meta-item"><a href="${url}" target="_blank">${url}</a></span>
+        <span class="svc-meta-item">↑${upStr}</span>
       </div>
-      <div class="row-actions">
-        <button class="btn restart" onclick="doRestart(event,'${row.name}')">restart</button>
-        <button class="btn stop" onclick="doStop(event,'${row.name}')">stop</button>
+      <div class="svc-actions">
+        <button class="act-btn restart" onclick="doRestart(event,'${row.name}')">restart</button>
+        <button class="act-btn stop"    onclick="doStop(event,'${row.name}')">stop</button>
       </div>`;
     list.appendChild(el);
   });
-  const run = rows.filter(r=>r.state==='running').length;
-  const stp = rows.filter(r=>r.state==='stopped'||r.state==='pending').length;
-  const fail = rows.filter(r=>r.state==='failed'||r.state==='unhealthy').length;
-  document.getElementById('footer-running').textContent = run+' running';
-  document.getElementById('footer-stopped').textContent = stp+' stopped';
-  document.getElementById('footer-failed').textContent = fail+' failed';
+
+  const run  = rows.filter(r => r.state === 'running').length;
+  const stp  = rows.filter(r => ['stopped','pending'].includes(r.state)).length;
+  const fail = rows.filter(r => ['failed','unhealthy'].includes(r.state)).length;
+
+  document.getElementById('stat-run').textContent = run;
+  document.getElementById('stat-stp').textContent = stp;
+  document.getElementById('stat-err').textContent = fail;
+
+  // Update topbar meta
+  document.getElementById('topbar-meta').textContent =
+    `${rows.length} service${rows.length !== 1 ? 's' : ''}`;
 }
 
-// ── SSE log stream ────────────────────────────────────────────────────────────
-let evtSrc = null;
-
+// ── Log streaming ─────────────────────────────────────────────
 async function loadHistory() {
-  const url = '/api/history' + (selected ? '?service='+encodeURIComponent(selected) : '');
+  const url = '/api/history' + (selected ? '?service=' + encodeURIComponent(selected) : '');
   try {
-    const res = await fetch(url);
-    const lines = await res.json();
+    const lines = await fetch(url).then(r => r.json());
     lines.forEach(m => appendLog(m.service, m.line, true));
-  } catch(_) {}
+  } catch {}
 }
 
 function connectLogs() {
   if (evtSrc) { evtSrc.close(); evtSrc = null; }
-  const url = '/api/logs' + (selected ? '?service='+encodeURIComponent(selected) : '');
+  const url = '/api/logs' + (selected ? '?service=' + encodeURIComponent(selected) : '');
   evtSrc = new EventSource(url);
   evtSrc.onmessage = e => {
-    try { const m = JSON.parse(e.data); appendLog(m.service, m.line); } catch(_){}
+    try { const m = JSON.parse(e.data); appendLog(m.service, m.line); } catch {}
   };
   evtSrc.onerror = () => setTimeout(connectLogs, 2000);
 }
 
-async function connectLogsWithHistory() {
+async function initLogs() {
   await loadHistory();
   connectLogs();
 }
 
 function appendLog(svc, text, isHistory) {
-  const out = document.getElementById('log-output');
-  const empty = out.querySelector('.log-empty');
+  const body  = document.getElementById('log-body');
+  const empty = body.querySelector('.log-empty');
   if (empty) empty.remove();
   if (selected && svc !== selected) return;
-  const el = document.createElement('div');
-  el.className = 'log-line' + (isHistory ? ' log-history' : '');
-  const ts = new Date().toLocaleTimeString('en',{hour12:false});
-  el.innerHTML = `<span class="log-ts">${ts}</span><span class="log-svc" style="color:${color(svc)}">[${svc}]</span><span class="log-text">${fmt(text)}</span>`;
-  out.appendChild(el);
-  logLines.push(el);
+
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  const c = svcColor(svc);
+  row.innerHTML =
+    `<span class="log-time">${nowTime()}</span>` +
+    `<span class="log-tag" style="color:${c}">[${svc}]</span>` +
+    `<span class="log-msg">${esc(stripAnsi(text))}</span>`;
+
+  body.appendChild(row);
+  logLines.push(row);
   while (logLines.length > MAX_LINES) logLines.shift().remove();
-  if (autoScroll) out.scrollTop = out.scrollHeight;
+  if (autoScroll) body.scrollTop = body.scrollHeight;
 }
 
-// ── Actions ───────────────────────────────────────────────────────────────────
-function selectService(name) {
+// ── Interactions ──────────────────────────────────────────────
+function selectSvc(name) {
   selected = name;
-  document.getElementById('log-title').textContent = name || 'all services';
-  document.getElementById('log-output').innerHTML = '<div class="log-empty">Loading...</div>';
+  document.getElementById('log-scope-label').textContent = name || 'all';
+  document.getElementById('log-body').innerHTML = '<div class="log-empty">loading…</div>';
   logLines = [];
-  connectLogsWithHistory();
-  document.querySelectorAll('.service-row').forEach(el => el.classList.toggle('selected', el.dataset.name === name));
-  document.getElementById('btn-all').classList.toggle('active', !name);
-}
-async function doRestart(e, name) { e.stopPropagation(); await fetch('/api/restart/'+encodeURIComponent(name),{method:'POST'}); }
-async function doStop(e, name) { e.stopPropagation(); await fetch('/api/stop/'+encodeURIComponent(name),{method:'POST'}); }
+  initLogs();
 
-document.getElementById('log-output').addEventListener('scroll', function() {
+  document.querySelectorAll('.svc-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.name === name));
+  document.getElementById('btn-all').classList.toggle('on', !name);
+}
+
+async function doRestart(e, name) {
+  e.stopPropagation();
+  await fetch('/api/restart/' + encodeURIComponent(name), { method: 'POST' });
+}
+async function doStop(e, name) {
+  e.stopPropagation();
+  await fetch('/api/stop/' + encodeURIComponent(name), { method: 'POST' });
+}
+
+document.getElementById('log-body').addEventListener('scroll', function() {
   autoScroll = this.scrollHeight - this.scrollTop - this.clientHeight < 40;
-  document.getElementById('autoscroll-hint').style.opacity = autoScroll ? '1' : '0.3';
+  document.getElementById('scroll-hint').style.opacity = autoScroll ? '1' : '0.3';
 });
 
-document.getElementById('footer-url').textContent = location.href;
+// ── Boot ──────────────────────────────────────────────────────
+document.getElementById('stat-url').textContent = location.host;
 poll();
 setInterval(poll, POLL_MS);
-connectLogsWithHistory();
+initLogs();
 </script>
 </body>
 </html>

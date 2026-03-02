@@ -291,6 +291,221 @@ async fn status_linux() -> Result<()> {
     Ok(())
 }
 
+// ── Structured status (for API) ───────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct KubeStatus {
+    pub installed: bool,
+    pub running: bool,
+    /// "running" | "stopped" | "not_installed"
+    pub state: String,
+}
+
+/// Return structured kube status for the web UI.
+pub async fn query_status() -> KubeStatus {
+    #[cfg(target_os = "macos")]
+    return query_status_macos().await;
+
+    #[cfg(target_os = "linux")]
+    return query_status_linux().await;
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    KubeStatus {
+        installed: false,
+        running: false,
+        state: "not_installed".into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn query_status_macos() -> KubeStatus {
+    if !cmd_exists("limactl").await {
+        return KubeStatus { installed: false, running: false, state: "not_installed".into() };
+    }
+    let out = tokio::process::Command::new("limactl")
+        .args(["list", "--format", "{{.Name}} {{.Status}}"])
+        .output()
+        .await;
+    let Ok(out) = out else {
+        return KubeStatus { installed: false, running: false, state: "not_installed".into() };
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().find(|l| l.starts_with("k3s "));
+    match line {
+        Some(l) if l.contains("Running") => KubeStatus { installed: true, running: true, state: "running".into() },
+        Some(_) => KubeStatus { installed: true, running: false, state: "stopped".into() },
+        None => KubeStatus { installed: false, running: false, state: "not_installed".into() },
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn query_status_linux() -> KubeStatus {
+    if !cmd_exists("k3s").await {
+        return KubeStatus { installed: false, running: false, state: "not_installed".into() };
+    }
+    let active = tokio::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "k3s"])
+        .status()
+        .await;
+    match active {
+        Ok(s) if s.success() => KubeStatus { installed: true, running: true, state: "running".into() },
+        _ => KubeStatus { installed: true, running: false, state: "stopped".into() },
+    }
+}
+
+// ── Resource queries (for web UI) ─────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct KubeResources {
+    pub namespaces: Vec<String>,
+    pub nodes: Vec<KubeNode>,
+    pub pods: Vec<KubePod>,
+}
+
+#[derive(serde::Serialize)]
+pub struct KubeNode {
+    pub name: String,
+    pub status: String,
+    pub roles: String,
+    pub version: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct KubePod {
+    pub name: String,
+    pub namespace: String,
+    pub status: String,
+    pub ready: String,
+    pub restarts: u32,
+    pub age: String,
+    pub node: String,
+}
+
+/// Fetch cluster resources via kubectl. `namespace` = None means all namespaces.
+pub async fn query_resources(namespace: Option<&str>) -> Result<KubeResources> {
+    let kubectl = kubectl_cmd().await;
+    let namespaces = get_namespaces(&kubectl).await?;
+    let nodes = get_nodes(&kubectl).await?;
+    let pods = get_pods(&kubectl, namespace).await?;
+    Ok(KubeResources { namespaces, nodes, pods })
+}
+
+/// Fetch recent logs for a pod (tail N lines).
+pub async fn pod_logs(namespace: &str, name: &str, tail: usize) -> Result<String> {
+    let out = tokio::process::Command::new("kubectl")
+        .args([
+            "logs", name,
+            "-n", namespace,
+            &format!("--tail={tail}"),
+            "--timestamps=true",
+        ])
+        .output()
+        .await
+        .map_err(DevError::Io)?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+pub async fn delete_pod(namespace: &str, name: &str) -> Result<()> {
+    let kubectl = kubectl_cmd().await;
+    let status = tokio::process::Command::new(&kubectl)
+        .args(["delete", "pod", name, "-n", namespace, "--grace-period=0"])
+        .status()
+        .await
+        .map_err(DevError::Io)?;
+    if !status.success() {
+        return Err(DevError::Config(format!("kubectl delete pod {name} failed")));
+    }
+    Ok(())
+}
+
+async fn kubectl_cmd() -> String {
+    // On macOS with Lima, kubectl talks to the Lima-forwarded API server.
+    // The kubeconfig is written to ~/.kube/config by start_macos / start_linux.
+    "kubectl".into()
+}
+
+async fn get_namespaces(kubectl: &str) -> Result<Vec<String>> {
+    let out = tokio::process::Command::new(kubectl)
+        .args(["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"])
+        .output()
+        .await
+        .map_err(DevError::Io)?;
+    if !out.status.success() {
+        return Ok(vec![]);
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    Ok(s.split_whitespace().map(|s| s.to_string()).collect())
+}
+
+async fn get_nodes(kubectl: &str) -> Result<Vec<KubeNode>> {
+    // Use JSON output for reliable parsing
+    let out = tokio::process::Command::new(kubectl)
+        .args(["get", "nodes", "-o", "json"])
+        .output()
+        .await
+        .map_err(DevError::Io)?;
+    if !out.status.success() {
+        return Ok(vec![]);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let items = v["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    Ok(items.iter().map(|item| {
+        let name = item["metadata"]["name"].as_str().unwrap_or("").to_string();
+        let version = item["status"]["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("").to_string();
+        let roles = item["metadata"]["labels"]
+            .as_object()
+            .map(|labels| {
+                let mut r: Vec<&str> = labels.keys()
+                    .filter_map(|k| k.strip_prefix("node-role.kubernetes.io/"))
+                    .collect();
+                r.sort();
+                if r.is_empty() { "<none>".to_string() } else { r.join(",") }
+            })
+            .unwrap_or_else(|| "<none>".to_string());
+        let status = item["status"]["conditions"].as_array()
+            .and_then(|conds| conds.iter().find(|c| c["type"] == "Ready"))
+            .and_then(|c| c["status"].as_str())
+            .map(|s| if s == "True" { "Ready" } else { "NotReady" })
+            .unwrap_or("Unknown")
+            .to_string();
+        KubeNode { name, status, roles, version }
+    }).collect())
+}
+
+async fn get_pods(kubectl: &str, namespace: Option<&str>) -> Result<Vec<KubePod>> {
+    let ns_args: Vec<&str> = match namespace {
+        Some(ns) => vec!["-n", ns],
+        None => vec!["--all-namespaces"],
+    };
+    let mut args = vec!["get", "pods"];
+    args.extend_from_slice(&ns_args);
+    args.extend_from_slice(&[
+        "-o", "custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,STATUS:.status.phase,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,NODE:.spec.nodeName",
+        "--no-headers",
+    ]);
+    let out = tokio::process::Command::new(kubectl)
+        .args(&args)
+        .output()
+        .await
+        .map_err(DevError::Io)?;
+    if !out.status.success() {
+        return Ok(vec![]);
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    Ok(s.lines().filter(|l| !l.trim().is_empty()).map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        KubePod {
+            name: cols.first().unwrap_or(&"").to_string(),
+            namespace: cols.get(1).unwrap_or(&"").to_string(),
+            status: cols.get(2).unwrap_or(&"").to_string(),
+            ready: cols.get(3).unwrap_or(&"false").to_string(),
+            restarts: cols.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+            age: String::new(),
+            node: cols.get(5).unwrap_or(&"").to_string(),
+        }
+    }).collect())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Run a command, streaming output to stdout, returning error on non-zero exit.

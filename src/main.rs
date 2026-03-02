@@ -6,6 +6,7 @@ use colored::Colorize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+mod box_mgr;
 mod brew;
 mod code;
 mod config;
@@ -74,6 +75,9 @@ enum Commands {
         /// Keep streaming
         #[arg(short, long, default_value_t = true)]
         follow: bool,
+        /// Filter log lines by keyword (case-insensitive)
+        #[arg(short, long)]
+        grep: Option<String>,
     },
     /// Generate a new A3sfile.hcl in the current directory
     Init,
@@ -109,6 +113,23 @@ enum Commands {
     Code {
         #[command(subcommand)]
         cmd: CodeCommands,
+    },
+    /// Run a command in a service's environment and directory
+    Exec {
+        /// Service name to take env and dir from
+        service: String,
+        /// Command and arguments
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Run a one-off command with the environment from A3sfile.hcl
+    Run {
+        /// Load env from a specific service (default: merge all services)
+        #[arg(short, long)]
+        service: Option<String>,
+        /// Command and arguments to run
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
     },
     /// Manage a local k3s Kubernetes cluster
     Kube {
@@ -249,7 +270,26 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
 
+            // Wait for Ctrl+C or SIGTERM so the socket is cleaned up on both
+            // graceful shutdown and `kill <pid>`.
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                match signal(SignalKind::terminate()) {
+                    Ok(mut sigterm) => {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {},
+                            _ = sigterm.recv() => {},
+                        }
+                    }
+                    Err(_) => {
+                        tokio::signal::ctrl_c().await.ok();
+                    }
+                }
+            }
+            #[cfg(not(unix))]
             tokio::signal::ctrl_c().await.ok();
+
             println!("\n{} shutting down...", "→".yellow());
             sup.stop_all().await;
             let _ = std::fs::remove_file(socket_path());
@@ -396,8 +436,8 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{} restarted {}", "✓".green(), service.cyan());
         }
 
-        Commands::Logs { service, follow } => {
-            stream_logs(service.clone(), *follow).await?;
+        Commands::Logs { service, follow, grep } => {
+            stream_logs(service.clone(), *follow, grep.clone()).await?;
         }
 
         Commands::Upgrade => {
@@ -576,6 +616,50 @@ async fn run(cli: Cli) -> Result<()> {
             proxy_tool(tool, rest).await?;
         }
 
+        Commands::Run { service, cmd } => {
+            let cfg = DevConfig::from_file(&cli.file)?;
+            let env: std::collections::HashMap<String, String> = if let Some(svc_name) = service {
+                let svc = cfg.service.get(svc_name.as_str()).ok_or_else(|| {
+                    DevError::Config(format!("unknown service '{svc_name}'"))
+                })?;
+                svc.env.clone()
+            } else {
+                // Merge all non-disabled services' env (later services win on conflict)
+                cfg.service
+                    .values()
+                    .filter(|s| !s.disabled)
+                    .flat_map(|s| s.env.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect()
+            };
+
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .envs(&env)
+                .exec();
+            return Err(DevError::Process {
+                service: cmd[0].clone(),
+                msg: err.to_string(),
+            });
+        }
+
+        Commands::Exec { service, cmd } => {
+            let cfg = DevConfig::from_file(&cli.file)?;
+            let svc = cfg.service.get(service.as_str()).ok_or_else(|| {
+                DevError::Config(format!("unknown service '{service}'"))
+            })?;
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new(&cmd[0]);
+            command.args(&cmd[1..]).envs(&svc.env);
+            if let Some(dir) = &svc.dir {
+                command.current_dir(dir);
+            }
+            let err = command.exec();
+            return Err(DevError::Process {
+                service: cmd[0].clone(),
+                msg: err.to_string(),
+            });
+        }
         Commands::Code { cmd } => match cmd {
             CodeCommands::Init { dir } => {
                 println!("{} a3s-code agent scaffolding\r\n", "→".cyan());
@@ -694,7 +778,7 @@ async fn ipc_send(req: IpcRequest) -> Result<IpcResponse> {
     serde_json::from_str(&resp_line).map_err(|e| DevError::Config(format!("bad IPC response: {e}")))
 }
 
-async fn stream_logs(service: Option<String>, follow: bool) -> Result<()> {
+async fn stream_logs(service: Option<String>, follow: bool, grep: Option<String>) -> Result<()> {
     // First replay history (last 200 lines)
     {
         let stream = UnixStream::connect(socket_path())
@@ -722,7 +806,9 @@ async fn stream_logs(service: Option<String>, follow: bool) -> Result<()> {
                 line: text,
             }) = serde_json::from_str::<IpcResponse>(&line)
             {
-                println!("{} {}", format!("[{svc}]").dimmed(), text);
+                if grep.as_deref().map_or(true, |g| text.to_lowercase().contains(&g.to_lowercase())) {
+                    println!("{} {}", format!("[{svc}]").dimmed(), text);
+                }
             }
         }
     }
@@ -758,7 +844,9 @@ async fn stream_logs(service: Option<String>, follow: bool) -> Result<()> {
             line: text,
         }) = serde_json::from_str::<IpcResponse>(&line)
         {
-            println!("{} {}", format!("[{service}]").cyan(), text);
+            if grep.as_deref().map_or(true, |g| text.to_lowercase().contains(&g.to_lowercase())) {
+                println!("{} {}", format!("[{service}]").cyan(), text);
+            }
         }
     }
 

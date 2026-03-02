@@ -84,9 +84,11 @@ mod tests {
                     port: 8000 + i as u16,
                     subdomain: None,
                     env: Default::default(),
+                    env_file: None,
                     depends_on: deps.iter().map(|s| s.to_string()).collect(),
                     watch: None,
                     health: None,
+                    disabled: false,
                 },
             );
         }

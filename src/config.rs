@@ -59,12 +59,19 @@ pub struct ServiceDef {
     pub subdomain: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Path to a .env file to load. Relative to the A3sfile.hcl directory.
+    /// Variables in `env` take precedence over env_file.
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub watch: Option<WatchConfig>,
     #[serde(default)]
     pub health: Option<HealthConfig>,
+    /// If true, this service is skipped entirely (not started, not validated for deps).
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -146,17 +153,54 @@ impl DevConfig {
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| DevError::Config(format!("cannot read {}: {e}", path.display())))?;
-        let cfg: DevConfig = hcl::from_str(&src)
+        let mut cfg: DevConfig = hcl::from_str(&src)
             .map_err(|e| DevError::Config(format!("parse error in {}: {e}", path.display())))?;
+        let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
+        cfg.resolve_env_files(base_dir)?;
         cfg.validate()?;
         Ok(cfg)
     }
 
+    /// For each service with an `env_file`, parse the file and merge its variables.
+    /// Variables already present in `env` take precedence (env_file provides defaults).
+    fn resolve_env_files(&mut self, base_dir: &std::path::Path) -> Result<()> {
+        for (name, svc) in &mut self.service {
+            let Some(ref env_file) = svc.env_file else {
+                continue;
+            };
+            let path = if env_file.is_absolute() {
+                env_file.clone()
+            } else {
+                base_dir.join(env_file)
+            };
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                DevError::Config(format!(
+                    "service '{name}': cannot read env_file {}: {e}",
+                    path.display()
+                ))
+            })?;
+            for line in contents.lines() {
+                let line = line.trim();
+                // Skip blank lines and comments
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    let key = k.trim().to_string();
+                    let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    // env takes precedence over env_file
+                    svc.env.entry(key).or_insert(val);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
-        // Port conflict check — skip port 0 (auto-assigned at runtime)
+        // Port conflict check — skip port 0 (auto-assigned at runtime) and disabled services
         let mut seen: HashMap<u16, &str> = HashMap::new();
         for (name, svc) in &self.service {
-            if svc.port == 0 {
+            if svc.disabled || svc.port == 0 {
                 continue;
             }
             if let Some(other) = seen.insert(svc.port, name.as_str()) {
@@ -167,12 +211,16 @@ impl DevConfig {
                 });
             }
         }
-        // Unknown depends_on references
+        // Unknown depends_on references — skip disabled services
         for (name, svc) in &self.service {
+            if svc.disabled {
+                continue;
+            }
             for dep in &svc.depends_on {
-                if !self.service.contains_key(dep) {
+                let dep_svc = self.service.get(dep);
+                if dep_svc.is_none() || dep_svc.is_some_and(|d| d.disabled) {
                     return Err(DevError::Config(format!(
-                        "service '{name}' depends_on unknown service '{dep}'"
+                        "service '{name}' depends_on unknown or disabled service '{dep}'"
                     )));
                 }
             }
@@ -192,9 +240,11 @@ mod tests {
             port,
             subdomain: None,
             env: Default::default(),
+            env_file: None,
             depends_on: depends_on.into_iter().map(|s| s.to_string()).collect(),
             watch: None,
             health: None,
+            disabled: false,
         }
     }
 
@@ -239,6 +289,70 @@ mod tests {
     fn test_validate_unknown_depends_on() {
         let cfg = make_config(vec![("a", make_svc(3000, vec!["nonexistent"]))]);
         assert!(matches!(cfg.validate(), Err(DevError::Config(_))));
+    }
+
+    #[test]
+    fn test_disabled_skips_port_conflict() {
+        let mut svc_b = make_svc(3000, vec![]);
+        svc_b.disabled = true;
+        let cfg = make_config(vec![("a", make_svc(3000, vec![])), ("b", svc_b)]);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_depends_on_disabled_service_is_error() {
+        let mut svc_b = make_svc(3001, vec![]);
+        svc_b.disabled = true;
+        let cfg = make_config(vec![
+            ("a", make_svc(3000, vec!["b"])),
+            ("b", svc_b),
+        ]);
+        assert!(matches!(cfg.validate(), Err(DevError::Config(_))));
+    }
+
+    #[test]
+    fn test_env_file_loaded() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        writeln!(
+            std::fs::File::create(&env_path).unwrap(),
+            "FOO=bar\n# comment\nBAZ=qux"
+        )
+        .unwrap();
+
+        let hcl_path = dir.path().join("A3sfile.hcl");
+        std::fs::write(
+            &hcl_path,
+            "service \"web\" {\n  cmd = \"echo ok\"\n  env_file = \".env\"\n}\n",
+        )
+        .unwrap();
+
+        let cfg = DevConfig::from_file(&hcl_path).unwrap();
+        let svc = &cfg.service["web"];
+        assert_eq!(svc.env.get("FOO").map(|s| s.as_str()), Some("bar"));
+        assert_eq!(svc.env.get("BAZ").map(|s| s.as_str()), Some("qux"));
+    }
+
+    #[test]
+    fn test_env_overrides_env_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        writeln!(std::fs::File::create(&env_path).unwrap(), "FOO=from_file").unwrap();
+
+        let hcl_path = dir.path().join("A3sfile.hcl");
+        std::fs::write(
+            &hcl_path,
+            "service \"web\" {\n  cmd = \"echo ok\"\n  env_file = \".env\"\n  env = {\n    FOO = \"from_env\"\n  }\n}\n",
+        )
+        .unwrap();
+
+        let cfg = DevConfig::from_file(&hcl_path).unwrap();
+        assert_eq!(
+            cfg.service["web"].env.get("FOO").map(|s| s.as_str()),
+            Some("from_env")
+        );
     }
 
     #[test]

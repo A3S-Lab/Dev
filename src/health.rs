@@ -107,9 +107,11 @@ mod tests {
             port: 0,
             subdomain: None,
             env: Default::default(),
+            env_file: None,
             depends_on: vec![],
             watch: None,
             health: None,
+            disabled: false,
         }
     }
 

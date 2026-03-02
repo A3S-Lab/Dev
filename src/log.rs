@@ -85,8 +85,12 @@ impl LogAggregator {
 
     /// Return up to `n` recent log lines, optionally filtered by service.
     pub fn recent(&self, service: Option<&str>, n: usize) -> Vec<LogLine> {
-        let Ok(history) = self.history.lock() else {
-            return vec![];
+        let history = match self.history.lock() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("log history mutex poisoned, returning empty: {e}");
+                return vec![];
+            }
         };
         history
             .iter()

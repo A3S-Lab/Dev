@@ -7,6 +7,17 @@ use tokio::sync::broadcast;
 use crate::ipc::{socket_path, IpcRequest, IpcResponse};
 use crate::supervisor::Supervisor;
 
+/// Serialize `resp` to a newline-terminated JSON byte vec.
+/// Falls back to a generic error payload rather than panicking on failure.
+fn encode(resp: &IpcResponse) -> Vec<u8> {
+    let mut s = serde_json::to_string(resp).unwrap_or_else(|e| {
+        tracing::error!("IPC response serialize failed: {e}");
+        r#"{"Error":{"msg":"internal serialize error"}}"#.to_string()
+    });
+    s.push('\n');
+    s.into_bytes()
+}
+
 /// Start the Unix socket IPC server. Handles status/stop/restart/logs/history requests.
 pub async fn serve(sup: Arc<Supervisor>) {
     let path = socket_path();
@@ -43,11 +54,7 @@ pub async fn serve(sup: Arc<Supervisor>) {
                         let resp = IpcResponse::Error {
                             msg: format!("bad request: {e}"),
                         };
-                        let _ = writer
-                            .write_all(
-                                format!("{}\n", serde_json::to_string(&resp).unwrap()).as_bytes(),
-                            )
-                            .await;
+                        let _ = writer.write_all(&encode(&resp)).await;
                         continue;
                     }
                 };
@@ -56,11 +63,7 @@ pub async fn serve(sup: Arc<Supervisor>) {
                     IpcRequest::Status => {
                         let rows = sup.status_rows().await;
                         let resp = IpcResponse::Status { rows };
-                        let _ = writer
-                            .write_all(
-                                format!("{}\n", serde_json::to_string(&resp).unwrap()).as_bytes(),
-                            )
-                            .await;
+                        let _ = writer.write_all(&encode(&resp)).await;
                     }
 
                     IpcRequest::Stop { services } => {
@@ -71,12 +74,7 @@ pub async fn serve(sup: Arc<Supervisor>) {
                                 sup.stop_service(name).await;
                             }
                         }
-                        let _ = writer
-                            .write_all(
-                                format!("{}\n", serde_json::to_string(&IpcResponse::Ok).unwrap())
-                                    .as_bytes(),
-                            )
-                            .await;
+                        let _ = writer.write_all(&encode(&IpcResponse::Ok)).await;
                     }
 
                     IpcRequest::Restart { service } => {
@@ -84,11 +82,7 @@ pub async fn serve(sup: Arc<Supervisor>) {
                             Ok(_) => IpcResponse::Ok,
                             Err(e) => IpcResponse::Error { msg: e.to_string() },
                         };
-                        let _ = writer
-                            .write_all(
-                                format!("{}\n", serde_json::to_string(&resp).unwrap()).as_bytes(),
-                            )
-                            .await;
+                        let _ = writer.write_all(&encode(&resp)).await;
                     }
 
                     IpcRequest::Logs { service, follow } => {
@@ -101,17 +95,7 @@ pub async fn serve(sup: Arc<Supervisor>) {
                                             service: entry.service,
                                             line: entry.line,
                                         };
-                                        if writer
-                                            .write_all(
-                                                format!(
-                                                    "{}\n",
-                                                    serde_json::to_string(&resp).unwrap()
-                                                )
-                                                .as_bytes(),
-                                            )
-                                            .await
-                                            .is_err()
-                                        {
+                                        if writer.write_all(&encode(&resp)).await.is_err() {
                                             break;
                                         }
                                     }
@@ -132,14 +116,7 @@ pub async fn serve(sup: Arc<Supervisor>) {
                                 service: entry.service,
                                 line: entry.line,
                             };
-                            if writer
-                                .write_all(
-                                    format!("{}\n", serde_json::to_string(&resp).unwrap())
-                                        .as_bytes(),
-                                )
-                                .await
-                                .is_err()
-                            {
+                            if writer.write_all(&encode(&resp)).await.is_err() {
                                 break;
                             }
                         }
