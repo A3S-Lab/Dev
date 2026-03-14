@@ -76,7 +76,10 @@ fn run_health_monitor(
                     let mut map = handles.write().await;
                     if let Some(h) = map.get_mut(&svc_name) {
                         if let ServiceState::Unhealthy { pid, .. } = h.state {
-                            h.state = ServiceState::Running { pid, since: Instant::now() };
+                            h.state = ServiceState::Running {
+                                pid,
+                                since: Instant::now(),
+                            };
                             let _ = events.send(SupervisorEvent::StateChanged {
                                 service: svc_name.clone(),
                                 state: "running".into(),
@@ -99,8 +102,10 @@ fn run_health_monitor(
                         if let Some(h) = map.get_mut(&svc_name) {
                             let pid = h.state.pid();
                             if let Some(p) = pid {
-                                h.state =
-                                    ServiceState::Unhealthy { pid: p, failures: consecutive_failures };
+                                h.state = ServiceState::Unhealthy {
+                                    pid: p,
+                                    failures: consecutive_failures,
+                                };
                             }
                             pid
                         } else {
@@ -522,7 +527,10 @@ impl Supervisor {
                 let child_done = {
                     let mut map = handles.write().await;
                     if let Some(h) = map.get_mut(&svc_name) {
-                        if !matches!(h.state, ServiceState::Running { .. } | ServiceState::Unhealthy { .. }) {
+                        if !matches!(
+                            h.state,
+                            ServiceState::Running { .. } | ServiceState::Unhealthy { .. }
+                        ) {
                             break;
                         }
                         // Replace child with a dummy so we can await outside the lock.
@@ -589,9 +597,9 @@ impl Supervisor {
 
                 let backoff = {
                     let base = restart_policy.backoff.as_secs().max(1);
-                    let exp = base.saturating_pow(restart_count).min(
-                        restart_policy.max_backoff.as_secs(),
-                    );
+                    let exp = base
+                        .saturating_pow(restart_count)
+                        .min(restart_policy.max_backoff.as_secs());
                     std::time::Duration::from_secs(exp)
                 };
 

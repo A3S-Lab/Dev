@@ -33,15 +33,24 @@ impl DependencyGraph {
         for (name, svc) in &cfg.service {
             for dep in &svc.depends_on {
                 *in_degree.entry(name.as_str()).or_insert(0) += 1;
-                dependents.entry(dep.as_str()).or_default().push(name.as_str());
-                reverse_deps.entry(dep.clone()).or_default().push(name.clone());
+                dependents
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(name.as_str());
+                reverse_deps
+                    .entry(dep.clone())
+                    .or_default()
+                    .push(name.clone());
             }
         }
 
         // BFS level-by-level: each level becomes one startup wave.
         // Preserves declaration order as tiebreaker (names vec is insertion-ordered).
-        let mut queue: VecDeque<&str> =
-            names.iter().filter(|n| in_degree[*n] == 0).copied().collect();
+        let mut queue: VecDeque<&str> = names
+            .iter()
+            .filter(|n| in_degree[*n] == 0)
+            .copied()
+            .collect();
         let mut order = Vec::with_capacity(names.len());
         let mut waves: Vec<Vec<String>> = Vec::new();
 
@@ -273,11 +282,7 @@ mod tests {
     #[test]
     fn test_transitive_start_order_subset() {
         // Only a and b declared, requesting "b" only needs a+b (not c if c existed)
-        let cfg = make_config(vec![
-            ("a", vec![]),
-            ("b", vec!["a"]),
-            ("c", vec![]),
-        ]);
+        let cfg = make_config(vec![("a", vec![]), ("b", vec!["a"]), ("c", vec![])]);
         let g = DependencyGraph::from_config(&cfg).unwrap();
         let result = g.transitive_start_order(&["b"]);
         assert_eq!(result, ["a", "b"]);

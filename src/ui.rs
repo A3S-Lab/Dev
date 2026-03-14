@@ -130,38 +130,48 @@ async fn handle(
         (Method::GET, "/api/box/containers") => {
             let all = query.contains("all=true");
             match box_mgr::list_containers(all).await {
-                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
+                Ok(v) => full_response(
+                    "application/json",
+                    serde_json::to_vec(&v).unwrap_or_default(),
+                ),
                 Err(e) => error_response(&e.to_string()),
             }
         }
-        (Method::GET, "/api/box/images") => {
-            match box_mgr::list_images().await {
-                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
-                Err(e) => error_response(&e.to_string()),
-            }
-        }
-        (Method::GET, "/api/box/networks") => {
-            match box_mgr::list_networks().await {
-                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
-                Err(e) => error_response(&e.to_string()),
-            }
-        }
-        (Method::GET, "/api/box/volumes") => {
-            match box_mgr::list_volumes().await {
-                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
-                Err(e) => error_response(&e.to_string()),
-            }
-        }
-        (Method::GET, "/api/box/info") => {
-            match box_mgr::get_info().await {
-                Ok(v) => full_response("application/json", serde_json::to_vec(&v).unwrap_or_default()),
-                Err(e) => error_response(&e.to_string()),
-            }
-        }
+        (Method::GET, "/api/box/images") => match box_mgr::list_images().await {
+            Ok(v) => full_response(
+                "application/json",
+                serde_json::to_vec(&v).unwrap_or_default(),
+            ),
+            Err(e) => error_response(&e.to_string()),
+        },
+        (Method::GET, "/api/box/networks") => match box_mgr::list_networks().await {
+            Ok(v) => full_response(
+                "application/json",
+                serde_json::to_vec(&v).unwrap_or_default(),
+            ),
+            Err(e) => error_response(&e.to_string()),
+        },
+        (Method::GET, "/api/box/volumes") => match box_mgr::list_volumes().await {
+            Ok(v) => full_response(
+                "application/json",
+                serde_json::to_vec(&v).unwrap_or_default(),
+            ),
+            Err(e) => error_response(&e.to_string()),
+        },
+        (Method::GET, "/api/box/info") => match box_mgr::get_info().await {
+            Ok(v) => full_response(
+                "application/json",
+                serde_json::to_vec(&v).unwrap_or_default(),
+            ),
+            Err(e) => error_response(&e.to_string()),
+        },
         (Method::GET, p) if p.starts_with("/api/box/logs/") => {
             let id = urldecode(&p["/api/box/logs/".len()..]);
-            let tail: usize = query.split('&').find(|p| p.starts_with("tail="))
-                .and_then(|p| p["tail=".len()..].parse().ok()).unwrap_or(200);
+            let tail: usize = query
+                .split('&')
+                .find(|p| p.starts_with("tail="))
+                .and_then(|p| p["tail=".len()..].parse().ok())
+                .unwrap_or(200);
             match box_mgr::container_logs(&id, tail).await {
                 Ok(v) => full_response("text/plain; charset=utf-8", v.into_bytes()),
                 Err(e) => error_response(&e.to_string()),
@@ -204,7 +214,9 @@ async fn handle(
         }
         (Method::POST, p) if p.starts_with("/api/box/pull/") => {
             let r = urldecode(&p["/api/box/pull/".len()..]);
-            tokio::spawn(async move { let _ = box_mgr::pull_image(&r).await; });
+            tokio::spawn(async move {
+                let _ = box_mgr::pull_image(&r).await;
+            });
             full_response("application/json", b"{\"ok\":true}".to_vec())
         }
         _ => Response::builder()

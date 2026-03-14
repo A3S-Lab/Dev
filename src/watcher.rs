@@ -78,12 +78,7 @@ mod tests {
     async fn test_spawn_watcher_returns_stop_sender() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel::<String>(1);
-        let stop_tx = spawn_watcher(
-            "svc".into(),
-            vec![dir.path().to_path_buf()],
-            vec![],
-            tx,
-        );
+        let stop_tx = spawn_watcher("svc".into(), vec![dir.path().to_path_buf()], vec![], tx);
         // Sending stop should not panic
         let _ = stop_tx.send(());
     }
@@ -92,12 +87,7 @@ mod tests {
     async fn test_stop_sender_terminates_watcher_thread() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
-        let stop_tx = spawn_watcher(
-            "svc".into(),
-            vec![dir.path().to_path_buf()],
-            vec![],
-            tx,
-        );
+        let stop_tx = spawn_watcher("svc".into(), vec![dir.path().to_path_buf()], vec![], tx);
 
         // Stop the watcher thread
         let _ = stop_tx.send(());
@@ -112,12 +102,7 @@ mod tests {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
-        let stop_tx = spawn_watcher(
-            "my-svc".into(),
-            vec![dir.path().to_path_buf()],
-            vec![],
-            tx,
-        );
+        let stop_tx = spawn_watcher("my-svc".into(), vec![dir.path().to_path_buf()], vec![], tx);
 
         // Brief pause so the watcher is set up before we write
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -158,9 +143,11 @@ mod tests {
         drop(f);
 
         // No event should arrive within a short window
-        let result =
-            tokio::time::timeout(Duration::from_millis(700), rx.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(700), rx.recv()).await;
         let _ = stop_tx.send(());
-        assert!(result.is_err(), "should not have received event for ignored path");
+        assert!(
+            result.is_err(),
+            "should not have received event for ignored path"
+        );
     }
 }

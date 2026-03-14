@@ -93,7 +93,17 @@ enum Commands {
     /// Generate a new A3sfile.hcl in the current directory
     Init,
     /// Validate A3sfile.hcl without starting anything
-    Validate,
+    Validate {
+        /// Also check that service binaries exist on PATH and ports are not already in use
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Show live CPU and memory usage per service (requires a running daemon)
+    Top {
+        /// Refresh interval in seconds
+        #[arg(short, long, default_value_t = 2)]
+        interval: u64,
+    },
     /// Upgrade a3s to the latest version
     Upgrade,
     /// List all installed a3s ecosystem tools
@@ -126,7 +136,6 @@ enum Commands {
     #[command(external_subcommand)]
     Tool(Vec<String>),
 }
-
 
 #[tokio::main]
 async fn main() {
@@ -277,7 +286,12 @@ async fn run(cli: Cli) -> Result<()> {
                     path.display()
                 )));
             }
-            std::fs::write(path, INIT_TEMPLATE)
+            let project_type = detect_project_type();
+            let template = init_template(project_type);
+            if project_type != "generic" {
+                println!("{} detected {} project", "→".cyan(), project_type.cyan());
+            }
+            std::fs::write(path, template)
                 .map_err(|e| DevError::Config(format!("write {}: {e}", path.display())))?;
             println!(
                 "{} created {}",
@@ -316,7 +330,7 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
 
-        Commands::Validate => {
+        Commands::Validate { strict } => {
             let cfg = Arc::new(DevConfig::from_file(&cli.file)?);
             println!(
                 "{} A3sfile.hcl is valid ({} services)",
@@ -343,6 +357,102 @@ async fn run(cli: Cli) -> Result<()> {
             }
             graph::DependencyGraph::from_config(&cfg)?;
             println!("{} dependency graph OK", "✓".green());
+
+            if *strict {
+                println!("\n{} strict checks:", "→".cyan());
+                let mut all_ok = true;
+                for (name, svc) in &cfg.service {
+                    if svc.disabled {
+                        continue;
+                    }
+                    // Check that the binary in `cmd` exists on PATH.
+                    let binary = svc.cmd.split_whitespace().next().unwrap_or("");
+                    if which_binary(binary) {
+                        println!("  {} [{name}] binary '{binary}' found", "✓".green());
+                    } else {
+                        println!(
+                            "  {} [{name}] binary '{}' not found on PATH",
+                            "✗".red(),
+                            binary
+                        );
+                        all_ok = false;
+                    }
+                    // Check that a fixed port is not already bound.
+                    if svc.port != 0 {
+                        if port_available(svc.port) {
+                            println!("  {} [{name}] port {} is available", "✓".green(), svc.port);
+                        } else {
+                            println!(
+                                "  {} [{name}] port {} is already in use",
+                                "✗".red(),
+                                svc.port
+                            );
+                            all_ok = false;
+                        }
+                    }
+                }
+                if all_ok {
+                    println!("{} all strict checks passed", "✓".green());
+                } else {
+                    return Err(DevError::Config("strict validation failed".into()));
+                }
+            }
+        }
+
+        Commands::Top { interval } => {
+            loop {
+                let resp = ipc_send(IpcRequest::Status, &sock).await;
+                match resp {
+                    Ok(IpcResponse::Status { rows }) => {
+                        // Clear screen and move cursor to top-left.
+                        print!("\x1b[2J\x1b[H");
+                        println!(
+                            "{:<16} {:<12} {:<8} {:<10} {}",
+                            "SERVICE".bold(),
+                            "STATE".bold(),
+                            "PID".bold(),
+                            "CPU%".bold(),
+                            "MEM".bold(),
+                        );
+                        println!("{}", "─".repeat(56).dimmed());
+                        for row in &rows {
+                            let state_colored = match row.state.as_str() {
+                                "running" => row.state.green().to_string(),
+                                "starting" | "restarting" => row.state.yellow().to_string(),
+                                "unhealthy" | "failed" => row.state.red().to_string(),
+                                _ => row.state.dimmed().to_string(),
+                            };
+                            let (cpu_str, mem_str) = row
+                                .pid
+                                .and_then(query_process_stats)
+                                .map(|(cpu, mem)| (format!("{cpu:.1}%"), format_bytes(mem)))
+                                .unwrap_or_else(|| ("-".into(), "-".into()));
+                            println!(
+                                "{:<16} {:<20} {:<8} {:<10} {}",
+                                row.name,
+                                state_colored,
+                                row.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                                cpu_str,
+                                mem_str,
+                            );
+                        }
+                        println!(
+                            "\n{} refresh every {}s — Ctrl+C to exit",
+                            "·".dimmed(),
+                            interval
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("{} {e}", "[a3s]".red().bold());
+                        break;
+                    }
+                    _ => break,
+                }
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(*interval)) => {}
+                }
+            }
         }
 
         Commands::Status { json } => {
@@ -425,7 +535,12 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{} config reloaded", "✓".green());
         }
 
-        Commands::Logs { service, follow, grep, last } => {
+        Commands::Logs {
+            service,
+            follow,
+            grep,
+            last,
+        } => {
             stream_logs(service.clone(), *follow, grep.clone(), *last, &sock).await?;
         }
 
@@ -529,9 +644,10 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Run { service, cmd } => {
             let cfg = DevConfig::from_file(&cli.file)?;
             let env: std::collections::HashMap<String, String> = if let Some(svc_name) = service {
-                let svc = cfg.service.get(svc_name.as_str()).ok_or_else(|| {
-                    DevError::Config(format!("unknown service '{svc_name}'"))
-                })?;
+                let svc = cfg
+                    .service
+                    .get(svc_name.as_str())
+                    .ok_or_else(|| DevError::Config(format!("unknown service '{svc_name}'")))?;
                 svc.env.clone()
             } else {
                 // Merge all non-disabled services' env (later services win on conflict)
@@ -555,9 +671,10 @@ async fn run(cli: Cli) -> Result<()> {
 
         Commands::Exec { service, cmd } => {
             let cfg = DevConfig::from_file(&cli.file)?;
-            let svc = cfg.service.get(service.as_str()).ok_or_else(|| {
-                DevError::Config(format!("unknown service '{service}'"))
-            })?;
+            let svc = cfg
+                .service
+                .get(service.as_str())
+                .ok_or_else(|| DevError::Config(format!("unknown service '{service}'")))?;
             use std::os::unix::process::CommandExt;
             let mut command = std::process::Command::new(&cmd[0]);
             command.args(&cmd[1..]).envs(&svc.env);
@@ -642,8 +759,7 @@ async fn proxy_tool(alias: &str, args: &[String]) -> Result<()> {
 /// Poll the daemon via IPC until all services are healthy or the timeout expires.
 /// Used by `a3s up --detach --wait`.
 async fn wait_for_healthy(sock: &std::path::Path, timeout_secs: u64) -> Result<()> {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     // Wait for socket to appear (daemon may still be starting)
     loop {
@@ -735,7 +851,10 @@ async fn stream_logs(
                 line: text,
             }) = serde_json::from_str::<IpcResponse>(&line)
             {
-                if grep.as_deref().map_or(true, |g| text.to_lowercase().contains(&g.to_lowercase())) {
+                if grep
+                    .as_deref()
+                    .map_or(true, |g| text.to_lowercase().contains(&g.to_lowercase()))
+                {
                     println!("{} {}", format!("[{svc}]").dimmed(), text);
                 }
             }
@@ -773,7 +892,10 @@ async fn stream_logs(
             line: text,
         }) = serde_json::from_str::<IpcResponse>(&line)
         {
-            if grep.as_deref().map_or(true, |g| text.to_lowercase().contains(&g.to_lowercase())) {
+            if grep
+                .as_deref()
+                .map_or(true, |g| text.to_lowercase().contains(&g.to_lowercase()))
+            {
                 println!("{} {}", format!("[{service}]").cyan(), text);
             }
         }
@@ -782,4 +904,244 @@ async fn stream_logs(
     Ok(())
 }
 
+/// Check whether a TCP port is available to bind on localhost.
+fn port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Query CPU% and RSS memory (in bytes) for a process by PID using `ps`.
+/// Returns `None` if the process is not found or `ps` is unavailable.
+fn query_process_stats(pid: u32) -> Option<(f32, u64)> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "%cpu=,rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
+    let mut parts = line.split_whitespace();
+    let cpu: f32 = parts.next()?.parse().ok()?;
+    let rss_kb: u64 = parts.next()?.parse().ok()?;
+    Some((cpu, rss_kb * 1024))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    }
+}
+
+/// Detect the dominant project type by inspecting `dir` for well-known files.
+fn detect_project_type_in(dir: &std::path::Path) -> &'static str {
+    if dir.join("package.json").exists() {
+        "node"
+    } else if dir.join("Cargo.toml").exists() {
+        "rust"
+    } else if dir.join("go.mod").exists() {
+        "go"
+    } else if dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists() {
+        "python"
+    } else {
+        "generic"
+    }
+}
+
+fn detect_project_type() -> &'static str {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    detect_project_type_in(&cwd)
+}
+
+fn init_template(project_type: &str) -> &'static str {
+    match project_type {
+        "node" => INIT_TEMPLATE_NODE,
+        "rust" => INIT_TEMPLATE_RUST,
+        "go" => INIT_TEMPLATE_GO,
+        "python" => INIT_TEMPLATE_PYTHON,
+        _ => INIT_TEMPLATE,
+    }
+}
+
 const INIT_TEMPLATE: &str = include_str!("A3sfile.hcl");
+
+const INIT_TEMPLATE_NODE: &str = r#"# A3sfile.hcl — generated by `a3s init` (Node.js project)
+# Run `a3s up` to start all services.
+
+dev {
+  proxy_port = 7080
+}
+
+service "web" {
+  cmd       = "npm run dev"
+  port      = 3000
+  subdomain = "web"
+
+  watch {
+    paths  = ["src", "public"]
+    ignore = ["node_modules", ".next", "dist", "build"]
+  }
+
+  health {
+    type     = "http"
+    path     = "/"
+    interval = "2s"
+    timeout  = "2s"
+    retries  = 10
+  }
+}
+"#;
+
+const INIT_TEMPLATE_RUST: &str = r#"# A3sfile.hcl — generated by `a3s init` (Rust project)
+# Run `a3s up` to start all services.
+
+dev {
+  proxy_port = 7080
+}
+
+service "api" {
+  cmd       = "cargo run"
+  port      = 3000
+  subdomain = "api"
+
+  watch {
+    paths  = ["src"]
+    ignore = ["target"]
+  }
+
+  health {
+    type     = "http"
+    path     = "/health"
+    interval = "2s"
+    timeout  = "1s"
+    retries  = 10
+  }
+}
+"#;
+
+const INIT_TEMPLATE_GO: &str = r#"# A3sfile.hcl — generated by `a3s init` (Go project)
+# Run `a3s up` to start all services.
+
+dev {
+  proxy_port = 7080
+}
+
+service "api" {
+  cmd       = "go run ."
+  port      = 3000
+  subdomain = "api"
+
+  watch {
+    paths  = ["."]
+    ignore = ["vendor"]
+  }
+
+  health {
+    type     = "http"
+    path     = "/health"
+    interval = "2s"
+    timeout  = "1s"
+    retries  = 10
+  }
+}
+"#;
+
+const INIT_TEMPLATE_PYTHON: &str = r#"# A3sfile.hcl — generated by `a3s init` (Python project)
+# Run `a3s up` to start all services.
+
+dev {
+  proxy_port = 7080
+}
+
+service "api" {
+  cmd       = "uvicorn main:app --reload --port ${PORT}"
+  port      = 8000
+  subdomain = "api"
+
+  watch {
+    paths  = ["."]
+    ignore = ["__pycache__", ".venv", "*.pyc"]
+  }
+
+  health {
+    type     = "http"
+    path     = "/health"
+    interval = "2s"
+    timeout  = "1s"
+    retries  = 10
+  }
+}
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_available_free_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(port_available(port));
+    }
+
+    #[test]
+    fn test_port_unavailable_when_bound() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!port_available(port));
+        drop(listener);
+    }
+
+    #[test]
+    fn test_format_bytes_kb() {
+        assert_eq!(format_bytes(512 * 1024), "512 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_mb() {
+        assert_eq!(format_bytes(10 * 1024 * 1024), "10.0 MB");
+    }
+
+    #[test]
+    fn test_detect_project_type_generic_in_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(detect_project_type_in(dir.path()), "generic");
+    }
+
+    #[test]
+    fn test_detect_project_type_node() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(detect_project_type_in(dir.path()), "node");
+    }
+
+    #[test]
+    fn test_detect_project_type_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(detect_project_type_in(dir.path()), "rust");
+    }
+
+    #[test]
+    fn test_detect_project_type_go() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/app").unwrap();
+        assert_eq!(detect_project_type_in(dir.path()), "go");
+    }
+
+    #[test]
+    fn test_detect_project_type_python() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("requirements.txt"), "fastapi\n").unwrap();
+        assert_eq!(detect_project_type_in(dir.path()), "python");
+    }
+
+    #[test]
+    fn test_init_template_returns_correct_template() {
+        assert!(init_template("node").contains("npm run dev"));
+        assert!(init_template("rust").contains("cargo run"));
+        assert!(init_template("go").contains("go run"));
+        assert!(init_template("python").contains("uvicorn"));
+        assert!(init_template("generic").contains("a3s init"));
+    }
+}

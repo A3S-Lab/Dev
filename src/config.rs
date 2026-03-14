@@ -427,10 +427,7 @@ mod tests {
     fn test_depends_on_disabled_service_is_error() {
         let mut svc_b = make_svc(3001, vec![]);
         svc_b.disabled = true;
-        let cfg = make_config(vec![
-            ("a", make_svc(3000, vec!["b"])),
-            ("b", svc_b),
-        ]);
+        let cfg = make_config(vec![("a", make_svc(3000, vec!["b"])), ("b", svc_b)]);
         assert!(matches!(cfg.validate(), Err(DevError::Config(_))));
     }
 
@@ -584,8 +581,14 @@ service "b" { cmd = "echo" }
         )
         .unwrap();
         let cfg = DevConfig::from_file(&hcl_path).unwrap();
-        assert_eq!(cfg.service["a"].env.get("GLOBAL_VAR").map(|s| s.as_str()), Some("hello"));
-        assert_eq!(cfg.service["b"].env.get("GLOBAL_VAR").map(|s| s.as_str()), Some("hello"));
+        assert_eq!(
+            cfg.service["a"].env.get("GLOBAL_VAR").map(|s| s.as_str()),
+            Some("hello")
+        );
+        assert_eq!(
+            cfg.service["b"].env.get("GLOBAL_VAR").map(|s| s.as_str()),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -599,7 +602,10 @@ service "b" { cmd = "echo" }
         )
         .unwrap();
         let cfg = DevConfig::from_file(&hcl_path).unwrap();
-        assert_eq!(cfg.service["a"].env.get("FOO").map(|s| s.as_str()), Some("local"));
+        assert_eq!(
+            cfg.service["a"].env.get("FOO").map(|s| s.as_str()),
+            Some("local")
+        );
     }
 
     #[test]
@@ -677,8 +683,14 @@ service "api" {
 }
 "#;
         let cfg: DevConfig = hcl::from_str(src).unwrap();
-        assert_eq!(cfg.service["api"].pre_start.as_deref(), Some("echo starting"));
-        assert_eq!(cfg.service["api"].post_stop.as_deref(), Some("echo stopped"));
+        assert_eq!(
+            cfg.service["api"].pre_start.as_deref(),
+            Some("echo starting")
+        );
+        assert_eq!(
+            cfg.service["api"].post_stop.as_deref(),
+            Some("echo stopped")
+        );
     }
 
     #[test]

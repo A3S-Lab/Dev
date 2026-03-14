@@ -4,11 +4,8 @@ use std::path::PathBuf;
 /// that contains `config_path`. Two projects on the same machine get distinct
 /// sockets so their daemons never interfere with each other.
 pub fn socket_path(config_path: &std::path::Path) -> PathBuf {
-    let dir = config_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
-    let canonical =
-        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let dir = config_path.parent().unwrap_or(std::path::Path::new("."));
+    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     // djb2 hash of the canonical path string
     let s = canonical.to_string_lossy();
     let mut h: u64 = 5381;

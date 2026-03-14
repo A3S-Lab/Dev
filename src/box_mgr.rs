@@ -72,14 +72,20 @@ pub struct BoxInfo {
 
 pub async fn list_containers(all: bool) -> Result<Vec<BoxContainer>> {
     let mut args = vec!["ps", "--format", "json"];
-    if all { args.push("-a"); }
+    if all {
+        args.push("-a");
+    }
     let out = run(&args).await?;
-    if out.trim().is_empty() { return Ok(vec![]); }
+    if out.trim().is_empty() {
+        return Ok(vec![]);
+    }
     // Output is one JSON object per line
     let mut result = Vec::new();
     for line in out.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Ok(c) = serde_json::from_str::<BoxContainer>(line) {
             result.push(c);
         }
@@ -89,11 +95,15 @@ pub async fn list_containers(all: bool) -> Result<Vec<BoxContainer>> {
 
 pub async fn list_images() -> Result<Vec<BoxImage>> {
     let out = run(&["images", "--format", "json"]).await?;
-    if out.trim().is_empty() { return Ok(vec![]); }
+    if out.trim().is_empty() {
+        return Ok(vec![]);
+    }
     let mut result = Vec::new();
     for line in out.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Ok(img) = serde_json::from_str::<BoxImage>(line) {
             result.push(img);
         }
@@ -106,10 +116,10 @@ pub async fn list_networks() -> Result<Vec<BoxNetwork>> {
     Ok(parse_table(&out)
         .into_iter()
         .map(|cols| BoxNetwork {
-            name:      cols.first().cloned().unwrap_or_default(),
-            driver:    cols.get(1).cloned().unwrap_or_default(),
-            subnet:    cols.get(2).cloned().unwrap_or_default(),
-            gateway:   cols.get(3).cloned().unwrap_or_default(),
+            name: cols.first().cloned().unwrap_or_default(),
+            driver: cols.get(1).cloned().unwrap_or_default(),
+            subnet: cols.get(2).cloned().unwrap_or_default(),
+            gateway: cols.get(3).cloned().unwrap_or_default(),
             isolation: cols.get(4).cloned().unwrap_or_default(),
             endpoints: cols.get(5).cloned().unwrap_or_default(),
         })
@@ -121,10 +131,10 @@ pub async fn list_volumes() -> Result<Vec<BoxVolume>> {
     Ok(parse_table(&out)
         .into_iter()
         .map(|cols| BoxVolume {
-            driver:      cols.first().cloned().unwrap_or_default(),
-            name:        cols.get(1).cloned().unwrap_or_default(),
+            driver: cols.first().cloned().unwrap_or_default(),
+            name: cols.get(1).cloned().unwrap_or_default(),
             mount_point: cols.get(2).cloned().unwrap_or_default(),
-            in_use_by:   cols.get(3).cloned().unwrap_or_default(),
+            in_use_by: cols.get(3).cloned().unwrap_or_default(),
         })
         .collect())
 }
@@ -144,12 +154,20 @@ pub async fn get_info() -> Result<BoxInfo> {
             // "1 total, 0 running"
             let parts: Vec<&str> = v.split(',').collect();
             if let Some(t) = parts.first() {
-                info.boxes_total = t.trim().split_whitespace().next()
-                    .and_then(|n| n.parse().ok()).unwrap_or(0);
+                info.boxes_total = t
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
             }
             if let Some(r) = parts.get(1) {
-                info.boxes_running = r.trim().split_whitespace().next()
-                    .and_then(|n| n.parse().ok()).unwrap_or(0);
+                info.boxes_running = r
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
             }
         } else if let Some(v) = line.strip_prefix("Images: ") {
             info.images_cached = v.trim().to_string();
@@ -218,7 +236,8 @@ fn parse_table(text: &str) -> Vec<Vec<String>> {
         .map(|line| {
             // Split on 2+ consecutive spaces to handle column values with single spaces
             let re_split: Vec<&str> = line.trim().splitn(20, "  ").collect();
-            re_split.iter()
+            re_split
+                .iter()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
