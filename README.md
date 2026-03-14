@@ -146,6 +146,7 @@ a3s gateway --help
 | `a3s kube start` | Install and start a local k3s cluster |
 | `a3s kube stop` | Stop the local k3s cluster |
 | `a3s kube status` | Show k3s cluster status |
+| `a3s kube kubeconfig` | Write kubeconfig to `~/.kube/config` (macOS: run once after VM is Running) |
 
 On macOS, uses [Lima](https://lima-vm.io/) with the `template://k3s` template. On Linux, uses the official k3s install script + systemd.
 
@@ -245,19 +246,16 @@ just fmt
 - [x] `a3s kube` — local k3s cluster management (Lima on macOS, systemd on Linux)
 - [x] Port `0` — auto-assign a free port at startup; preserved across restarts
 - [x] `disabled` services — skipped at start, excluded from dependency validation
-
-### In Progress 🚧
-
-- [ ] **Health check → service state** — failed health checks log a warning but do not transition the service to `unhealthy` or trigger restart; `a3s status` never shows `unhealthy`
-- [ ] **kubeconfig merge on macOS** — `merge_kubeconfig_macos` is implemented but never called from `start_macos`; `kubectl` cannot connect to the Lima k3s cluster after `a3s kube start`
-- [ ] **Pod `age` field** — always empty in the web UI kube panel; needs to be derived from pod creation timestamp
+- [x] **Ongoing health monitoring** — continuous background health check loop; 3 consecutive failures → `unhealthy` state + SIGTERM + crash-recovery restart; recovers to `running` on success; monitor re-armed after each crash-recovery restart
+- [x] **`a3s kube kubeconfig`** — new subcommand that writes Lima k3s kubeconfig to `~/.kube/config`; run once after `a3s kube start` to enable `kubectl` on macOS
+- [x] **Pod `age` field** — derived from `metadata.creationTimestamp` via JSON output; displays `Xs`, `Xm`, `Xh`, `Xd`
+- [x] **File watcher `watcher_stop` leak fixed** — watcher stop sender is now propagated to restarted service handles; `stop_service()` correctly cancels the OS watcher after file-watcher-triggered restarts
 
 ### Planned 📋
 
 - [ ] SIGHUP config reload — apply changes to `A3sfile.hcl` without a full restart
 - [ ] Per-service restart policy — configurable `max_restarts`, `backoff`, and `on_failure` behavior in `A3sfile.hcl`
 - [ ] Graceful shutdown timeout — configurable per-service grace period before SIGKILL
-- [ ] File watcher `watcher_stop` on hot restart — currently leaked when a service restarts via the file watcher
 - [ ] Test coverage — `supervisor`, `proxy`, `watcher`, `box_mgr`, `kube` modules have no unit tests
 
 ## License

@@ -5,7 +5,7 @@ use std::time::Instant;
 use tokio::process::Child;
 use tokio::sync::{broadcast, RwLock};
 
-use crate::config::DevConfig;
+use crate::config::{DevConfig, ServiceDef};
 use crate::error::{DevError, Result};
 use crate::graph::DependencyGraph;
 use crate::health::HealthChecker;
@@ -34,6 +34,98 @@ struct ServiceHandle {
     port: u16,
     /// Stops the file watcher OS thread for this service, if any.
     watcher_stop: Option<std::sync::mpsc::SyncSender<()>>,
+}
+
+/// Number of consecutive health check failures before transitioning to `Unhealthy`
+/// and triggering a restart via SIGTERM.
+const HEALTH_FAILURE_THRESHOLD: u32 = 3;
+
+/// Spawn a background task that continuously monitors the health of a running service.
+/// On `HEALTH_FAILURE_THRESHOLD` consecutive failures the service is transitioned to
+/// `Unhealthy` and SIGTERM'd — crash recovery picks it up and restarts.
+/// The task exits once the service leaves the Running/Unhealthy state (e.g. stopped).
+fn run_health_monitor(
+    svc_name: String,
+    checker: Arc<HealthChecker>,
+    svc: ServiceDef,
+    handles: Arc<RwLock<HashMap<String, ServiceHandle>>>,
+    events: broadcast::Sender<SupervisorEvent>,
+) {
+    tokio::spawn(async move {
+        let mut consecutive_failures: u32 = 0;
+
+        loop {
+            tokio::time::sleep(checker.config.interval).await;
+
+            // Exit if service is no longer running.
+            let port = {
+                let map = handles.read().await;
+                match map.get(&svc_name) {
+                    Some(h) => match &h.state {
+                        ServiceState::Running { .. } | ServiceState::Unhealthy { .. } => h.port,
+                        _ => break,
+                    },
+                    None => break,
+                }
+            };
+
+            if checker.check_once(port, &svc).await {
+                if consecutive_failures > 0 {
+                    tracing::info!("[{svc_name}] health check recovered");
+                    // Restore Running state if currently Unhealthy.
+                    let mut map = handles.write().await;
+                    if let Some(h) = map.get_mut(&svc_name) {
+                        if let ServiceState::Unhealthy { pid, .. } = h.state {
+                            h.state = ServiceState::Running { pid, since: Instant::now() };
+                            let _ = events.send(SupervisorEvent::StateChanged {
+                                service: svc_name.clone(),
+                                state: "running".into(),
+                            });
+                        }
+                    }
+                }
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures += 1;
+                tracing::warn!(
+                    "[{svc_name}] health check failed ({consecutive_failures}/{})",
+                    HEALTH_FAILURE_THRESHOLD
+                );
+
+                if consecutive_failures >= HEALTH_FAILURE_THRESHOLD {
+                    // Transition to Unhealthy, then kill — crash recovery will restart.
+                    let pid = {
+                        let mut map = handles.write().await;
+                        if let Some(h) = map.get_mut(&svc_name) {
+                            let pid = h.state.pid();
+                            if let Some(p) = pid {
+                                h.state =
+                                    ServiceState::Unhealthy { pid: p, failures: consecutive_failures };
+                            }
+                            pid
+                        } else {
+                            break;
+                        }
+                    };
+                    let _ = events.send(SupervisorEvent::StateChanged {
+                        service: svc_name.clone(),
+                        state: "unhealthy".into(),
+                    });
+                    tracing::error!(
+                        "[{svc_name}] unhealthy after {consecutive_failures} failures — restarting"
+                    );
+                    #[cfg(unix)]
+                    if let Some(p) = pid {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        let _ = kill(Pid::from_raw(p as i32), Signal::SIGTERM);
+                    }
+                    // Exit — crash recovery owns the restart and will re-arm a new monitor.
+                    break;
+                }
+            }
+        }
+    });
 }
 
 pub struct Supervisor {
@@ -143,12 +235,17 @@ impl Supervisor {
             state: "running".into(),
         });
 
-        // Crash recovery — monitor process and auto-restart on unexpected exit
-        self.spawn_crash_recovery(name.to_string(), color_idx);
+        // Build health checker once so both startup wait and ongoing monitor share it.
+        let health_info: Option<(Arc<HealthChecker>, ServiceDef)> =
+            HealthChecker::for_service(&svc).map(|c| (Arc::new(c), svc.clone()));
 
-        // Wait for health before unblocking dependents
-        if let Some(checker) = HealthChecker::for_service(&svc) {
-            let healthy = checker.wait_healthy(&svc, port).await;
+        // Crash recovery — monitor process and auto-restart on unexpected exit.
+        // Pass health_info so recovery can re-arm the monitor after each restart.
+        self.spawn_crash_recovery(name.to_string(), color_idx, health_info.clone());
+
+        // Wait for health before unblocking dependents, then start ongoing monitor.
+        if let Some((checker, svc_def)) = health_info {
+            let healthy = checker.wait_healthy(&svc_def, port).await;
             self.emit(SupervisorEvent::HealthChange {
                 service: name.to_string(),
                 healthy,
@@ -159,6 +256,14 @@ impl Supervisor {
                     checker.config.retries
                 );
             }
+            // Start ongoing health monitor regardless of startup result.
+            run_health_monitor(
+                name.to_string(),
+                checker,
+                svc_def,
+                self.handles.clone(),
+                self.events.clone(),
+            );
         }
 
         // File watcher → auto-restart on change
@@ -263,7 +368,13 @@ impl Supervisor {
     }
 
     /// Spawn a task that monitors the process and auto-restarts on unexpected exit.
-    fn spawn_crash_recovery(&self, svc_name: String, color_idx: usize) {
+    /// `health_info` is cloned and used to re-arm the ongoing health monitor after each restart.
+    fn spawn_crash_recovery(
+        &self,
+        svc_name: String,
+        color_idx: usize,
+        health_info: Option<(Arc<HealthChecker>, ServiceDef)>,
+    ) {
         let handles = self.handles.clone();
         let events = self.events.clone();
         let config = self.config.clone();
@@ -383,6 +494,16 @@ impl Supervisor {
                             service: svc_name.clone(),
                             state: "running".into(),
                         });
+                        // Re-arm health monitor for the restarted process.
+                        if let Some((ref checker, ref svc_def_h)) = health_info {
+                            run_health_monitor(
+                                svc_name.clone(),
+                                checker.clone(),
+                                svc_def_h.clone(),
+                                handles.clone(),
+                                events.clone(),
+                            );
+                        }
                         backoff_secs = 1;
                         restart_count = 0;
                     }
@@ -396,7 +517,7 @@ impl Supervisor {
     }
 
     /// Spawn a task that watches files and restarts the service on change.
-    /// Returns a sender that stops the watcher when `true` is sent.
+    /// Returns a sender that stops the watcher when any value is sent.
     fn spawn_file_watcher(
         &self,
         svc_name: String,
@@ -410,6 +531,8 @@ impl Supervisor {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let stop_tx = spawn_watcher(svc_name.clone(), paths, ignore, tx);
+        // Clone so the task can propagate watcher_stop to restarted service handles.
+        let task_stop_tx = stop_tx.clone();
 
         tokio::spawn(async move {
             while let Some(changed_svc) = rx.recv().await {
@@ -456,7 +579,9 @@ impl Supervisor {
                                 },
                                 color_idx,
                                 port,
-                                watcher_stop: None,
+                                // Propagate watcher_stop so stop_service() can cancel the
+                                // watcher even after a file-watcher-triggered restart.
+                                watcher_stop: Some(task_stop_tx.clone()),
                             },
                         );
                         let _ = events.send(SupervisorEvent::StateChanged {

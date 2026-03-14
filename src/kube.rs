@@ -17,6 +17,27 @@ pub async fn start() -> Result<()> {
     ))
 }
 
+/// Write the Lima k3s kubeconfig to ~/.kube/config so kubectl can connect.
+/// Must be called after `a3s kube start` once the VM is in the Running state.
+pub async fn kubeconfig() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return merge_kubeconfig_macos().await;
+
+    #[cfg(target_os = "linux")]
+    {
+        println!(
+            "  {} On Linux, kubeconfig is written automatically during `a3s kube start`.",
+            "·".dimmed()
+        );
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Err(DevError::Config(
+        "kube is only supported on macOS and Linux".into(),
+    ))
+}
+
 /// Stop and clean up k3s.
 pub async fn stop() -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -481,10 +502,8 @@ async fn get_pods(kubectl: &str, namespace: Option<&str>) -> Result<Vec<KubePod>
     };
     let mut args = vec!["get", "pods"];
     args.extend_from_slice(&ns_args);
-    args.extend_from_slice(&[
-        "-o", "custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,STATUS:.status.phase,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,NODE:.spec.nodeName",
-        "--no-headers",
-    ]);
+    args.push("-o");
+    args.push("json");
     let out = tokio::process::Command::new(kubectl)
         .args(&args)
         .output()
@@ -493,19 +512,78 @@ async fn get_pods(kubectl: &str, namespace: Option<&str>) -> Result<Vec<KubePod>
     if !out.status.success() {
         return Ok(vec![]);
     }
-    let s = String::from_utf8_lossy(&out.stdout);
-    Ok(s.lines().filter(|l| !l.trim().is_empty()).map(|line| {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        KubePod {
-            name: cols.first().unwrap_or(&"").to_string(),
-            namespace: cols.get(1).unwrap_or(&"").to_string(),
-            status: cols.get(2).unwrap_or(&"").to_string(),
-            ready: cols.get(3).unwrap_or(&"false").to_string(),
-            restarts: cols.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
-            age: String::new(),
-            node: cols.get(5).unwrap_or(&"").to_string(),
-        }
-    }).collect())
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let items = v["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    Ok(items
+        .iter()
+        .map(|item| {
+            let name = item["metadata"]["name"].as_str().unwrap_or("").to_string();
+            let namespace =
+                item["metadata"]["namespace"].as_str().unwrap_or("").to_string();
+            let status = item["status"]["phase"].as_str().unwrap_or("").to_string();
+            let container_statuses = item["status"]["containerStatuses"].as_array();
+            let ready = container_statuses
+                .and_then(|cs| cs.first())
+                .and_then(|c| c["ready"].as_bool())
+                .map(|b| if b { "true" } else { "false" })
+                .unwrap_or("false")
+                .to_string();
+            let restarts: u32 = container_statuses
+                .and_then(|cs| cs.first())
+                .and_then(|c| c["restartCount"].as_u64())
+                .unwrap_or(0) as u32;
+            let node = item["spec"]["nodeName"].as_str().unwrap_or("").to_string();
+            let age = item["metadata"]["creationTimestamp"]
+                .as_str()
+                .map(format_age)
+                .unwrap_or_default();
+            KubePod { name, namespace, status, ready, restarts, age, node }
+        })
+        .collect())
+}
+
+/// Parse an RFC3339 UTC timestamp ("2024-01-15T10:30:00Z") and return
+/// a human-readable age string (e.g. "3d", "2h", "45m", "30s").
+fn format_age(ts: &str) -> String {
+    let Some(epoch_secs) = rfc3339_to_epoch_secs(ts) else {
+        return String::new();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age = now.saturating_sub(epoch_secs);
+    if age >= 86400 {
+        format!("{}d", age / 86400)
+    } else if age >= 3600 {
+        format!("{}h", age / 3600)
+    } else if age >= 60 {
+        format!("{}m", age / 60)
+    } else {
+        format!("{age}s")
+    }
+}
+
+/// Convert an RFC3339 UTC timestamp to seconds since Unix epoch.
+/// Handles the "YYYY-MM-DDTHH:MM:SSZ" format produced by the Kubernetes API.
+fn rfc3339_to_epoch_secs(s: &str) -> Option<u64> {
+    let s = s.strip_suffix('Z').unwrap_or(s);
+    let (date, time) = s.split_once('T')?;
+    let mut dp = date.split('-');
+    let y: u64 = dp.next()?.parse().ok()?;
+    let m: u64 = dp.next()?.parse().ok()?;
+    let d: u64 = dp.next()?.parse().ok()?;
+    let mut tp = time.split(':');
+    let h: u64 = tp.next()?.parse().ok()?;
+    let min: u64 = tp.next()?.parse().ok()?;
+    let sec: u64 = tp.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // Julian Day Number → Unix epoch (JDN 2440588 = 1970-01-01)
+    let a = (14u64.saturating_sub(m)) / 12;
+    let y2 = y + 4800 - a;
+    let m2 = m + 12 * a - 3;
+    let jdn = d + (153 * m2 + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045;
+    let days = jdn.saturating_sub(2_440_588);
+    Some(days * 86400 + h * 3600 + min * 60 + sec)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -553,5 +631,42 @@ mod tests {
     #[tokio::test]
     async fn test_cmd_exists_false() {
         assert!(!cmd_exists("__nonexistent_binary_xyz__").await);
+    }
+
+    #[test]
+    fn test_rfc3339_to_epoch_secs_known_date() {
+        // 1970-01-01T00:00:00Z = epoch 0
+        assert_eq!(rfc3339_to_epoch_secs("1970-01-01T00:00:00Z"), Some(0));
+        // 2024-01-01T00:00:00Z = 1704067200
+        assert_eq!(
+            rfc3339_to_epoch_secs("2024-01-01T00:00:00Z"),
+            Some(1_704_067_200)
+        );
+    }
+
+    #[test]
+    fn test_format_age_display_units() {
+        // Test the formatting logic directly with known durations
+        fn age_str(secs: u64) -> String {
+            if secs >= 86400 {
+                format!("{}d", secs / 86400)
+            } else if secs >= 3600 {
+                format!("{}h", secs / 3600)
+            } else if secs >= 60 {
+                format!("{}m", secs / 60)
+            } else {
+                format!("{secs}s")
+            }
+        }
+        assert_eq!(age_str(45), "45s");
+        assert_eq!(age_str(125), "2m");
+        assert_eq!(age_str(7200), "2h");
+        assert_eq!(age_str(172800), "2d");
+    }
+
+    #[test]
+    fn test_rfc3339_invalid_returns_none() {
+        assert_eq!(rfc3339_to_epoch_secs("not-a-date"), None);
+        assert_eq!(rfc3339_to_epoch_secs(""), None);
     }
 }

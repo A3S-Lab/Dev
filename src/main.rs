@@ -125,6 +125,8 @@ enum KubeCommands {
     Stop,
     /// Show k3s cluster status
     Status,
+    /// Write kubeconfig to ~/.kube/config so kubectl can connect (macOS: run after VM is Running)
+    Kubeconfig,
 }
 
 #[tokio::main]
@@ -541,6 +543,7 @@ async fn run(cli: Cli) -> Result<()> {
             KubeCommands::Start => kube::start().await?,
             KubeCommands::Stop => kube::stop().await?,
             KubeCommands::Status => kube::status().await?,
+            KubeCommands::Kubeconfig => kube::kubeconfig().await?,
         },
     }
 

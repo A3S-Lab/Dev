@@ -93,6 +93,11 @@ impl HealthChecker {
         }
         false
     }
+
+    /// Run a single health check. Used by the ongoing health monitor.
+    pub async fn check_once(&self, port: u16, svc: &ServiceDef) -> bool {
+        self.probe.check(port, svc).await
+    }
 }
 
 #[cfg(test)]
