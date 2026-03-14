@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Agentation } from 'agentation';
 import './index.css';
 
 // ── Types ─────────────────────────────────────────────────────
@@ -990,6 +991,7 @@ export default function App() {
         <BoxPanel />
       )}
       <Statusbar rows={rows} />
+      {import.meta.env.DEV && <Agentation />}
     </div>
   );
 }

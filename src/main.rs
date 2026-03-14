@@ -215,20 +215,29 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
 
-            // Wait for Ctrl+C or SIGTERM so the socket is cleaned up on both
-            // graceful shutdown and `kill <pid>`.
+            // Wait for Ctrl+C, SIGTERM (shutdown) or SIGHUP (config reload).
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{signal, SignalKind};
-                match signal(SignalKind::terminate()) {
-                    Ok(mut sigterm) => {
-                        tokio::select! {
-                            _ = tokio::signal::ctrl_c() => {},
-                            _ = sigterm.recv() => {},
+                let mut sigterm = signal(SignalKind::terminate())
+                    .unwrap_or_else(|_| signal(SignalKind::terminate()).unwrap());
+                let mut sighup = signal(SignalKind::hangup())
+                    .unwrap_or_else(|_| signal(SignalKind::hangup()).unwrap());
+                loop {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => break,
+                        _ = sigterm.recv() => break,
+                        _ = sighup.recv() => {
+                            tracing::info!("SIGHUP received — reloading config");
+                            match DevConfig::from_file(&cli.file) {
+                                Ok(new_cfg) => {
+                                    if let Err(e) = sup.reload(Arc::new(new_cfg)).await {
+                                        tracing::error!("config reload failed: {e}");
+                                    }
+                                }
+                                Err(e) => tracing::error!("SIGHUP: bad config — {e}"),
+                            }
                         }
-                    }
-                    Err(_) => {
-                        tokio::signal::ctrl_c().await.ok();
                     }
                 }
             }

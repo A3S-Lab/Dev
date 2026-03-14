@@ -128,8 +128,12 @@ fn run_health_monitor(
     });
 }
 
+/// A shared, hot-swappable config cell. Wrapping `Arc<DevConfig>` in a std `RwLock` allows
+/// `reload()` to atomically replace the config without touching any async state.
+type ConfigCell = Arc<std::sync::RwLock<Arc<DevConfig>>>;
+
 pub struct Supervisor {
-    config: Arc<DevConfig>,
+    config: ConfigCell,
     handles: Arc<RwLock<HashMap<String, ServiceHandle>>>,
     events: broadcast::Sender<SupervisorEvent>,
     log: Arc<LogAggregator>,
@@ -148,7 +152,7 @@ impl Supervisor {
         LogAggregator::spawn_history_recorder(log.clone());
         (
             Self {
-                config,
+                config: Arc::new(std::sync::RwLock::new(config)),
                 handles: Arc::new(RwLock::new(HashMap::new())),
                 events,
                 log,
@@ -156,6 +160,11 @@ impl Supervisor {
             },
             rx,
         )
+    }
+
+    /// Return a snapshot of the current config. Cheap — only clones the Arc.
+    fn cfg(&self) -> Arc<DevConfig> {
+        Arc::clone(&self.config.read().unwrap())
     }
 
     pub fn subscribe_logs(&self) -> broadcast::Receiver<crate::log::LogLine> {
@@ -167,10 +176,11 @@ impl Supervisor {
     }
 
     pub async fn start_all(&self) -> Result<()> {
-        let graph = DependencyGraph::from_config(&self.config)?;
+        let cfg = self.cfg();
+        let graph = DependencyGraph::from_config(&cfg)?;
         let names: Vec<String> = graph.start_order().to_vec();
         for (idx, name) in names.iter().enumerate() {
-            if self.config.service.get(name).is_some_and(|s| s.disabled) {
+            if cfg.service.get(name).is_some_and(|s| s.disabled) {
                 tracing::info!("[{name}] skipped (disabled)");
                 continue;
             }
@@ -180,8 +190,8 @@ impl Supervisor {
     }
 
     pub async fn start_service(&self, name: &str, color_idx: usize) -> Result<()> {
-        let svc = self
-            .config
+        let cfg = self.cfg();
+        let svc = cfg
             .service
             .get(name)
             .ok_or_else(|| DevError::UnknownService(name.to_string()))?
@@ -284,7 +294,7 @@ impl Supervisor {
     }
 
     pub async fn stop_all(&self) {
-        let graph = match DependencyGraph::from_config(&self.config) {
+        let graph = match DependencyGraph::from_config(&self.cfg()) {
             Ok(g) => g,
             Err(_) => return,
         };
@@ -295,6 +305,13 @@ impl Supervisor {
     }
 
     pub async fn stop_service(&self, name: &str) {
+        let stop_timeout = self
+            .cfg()
+            .service
+            .get(name)
+            .map(|s| s.stop_timeout)
+            .unwrap_or(std::time::Duration::from_secs(5));
+
         let mut map = self.handles.write().await;
         if let Some(h) = map.get_mut(name) {
             // Cancel file watcher first
@@ -307,8 +324,7 @@ impl Supervisor {
                 use nix::unistd::Pid;
                 if let Some(pid) = h.state.pid() {
                     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h.child.wait())
-                        .await;
+                    let _ = tokio::time::timeout(stop_timeout, h.child.wait()).await;
                 }
             }
             let _ = h.child.kill().await;
@@ -333,9 +349,9 @@ impl Supervisor {
     }
 
     pub async fn status_rows(&self) -> Vec<StatusRow> {
+        let cfg = self.cfg();
         let map = self.handles.read().await;
-        self.config
-            .service
+        cfg.service
             .iter()
             .map(|(name, svc)| {
                 let handle = map.get(name);
@@ -357,7 +373,7 @@ impl Supervisor {
                     port: handle.map(|h| h.port).unwrap_or(svc.port),
                     subdomain: svc.subdomain.clone(),
                     uptime_secs,
-                    proxy_port: self.config.dev.proxy_port,
+                    proxy_port: cfg.dev.proxy_port,
                 }
             })
             .collect()
@@ -377,7 +393,7 @@ impl Supervisor {
     ) {
         let handles = self.handles.clone();
         let events = self.events.clone();
-        let config = self.config.clone();
+        let config_cell = self.config.clone();
         let log = self.log.clone();
         let proxy = self.proxy.clone();
 
@@ -389,8 +405,6 @@ impl Supervisor {
                 .get(&svc_name)
                 .map(|h| h.port)
                 .unwrap_or(0);
-            let mut backoff_secs = 1u64;
-            const MAX_RESTARTS: u32 = 10;
             let mut restart_count = 0u32;
 
             loop {
@@ -399,7 +413,7 @@ impl Supervisor {
                 let child_done = {
                     let mut map = handles.write().await;
                     if let Some(h) = map.get_mut(&svc_name) {
-                        if !matches!(h.state, ServiceState::Running { .. }) {
+                        if !matches!(h.state, ServiceState::Running { .. } | ServiceState::Unhealthy { .. }) {
                             break;
                         }
                         // Replace child with a dummy so we can await outside the lock.
@@ -429,9 +443,21 @@ impl Supervisor {
                     }
                 }
 
-                restart_count += 1;
-                if restart_count > MAX_RESTARTS {
-                    tracing::error!("[{svc_name}] crashed {MAX_RESTARTS} times — giving up");
+                // Read restart policy from current service config (reflects reloads).
+                let restart_policy = config_cell
+                    .read()
+                    .unwrap()
+                    .service
+                    .get(&svc_name)
+                    .map(|s| s.restart.clone())
+                    .unwrap_or_default();
+
+                if matches!(restart_policy.on_failure, crate::config::OnFailure::Stop) {
+                    let code = exit_status.and_then(|s| s.code());
+                    tracing::warn!(
+                        "[{svc_name}] exited (code={}) — on_failure=stop, not restarting",
+                        code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                    );
                     let _ = events.send(SupervisorEvent::StateChanged {
                         service: svc_name.clone(),
                         state: "failed".into(),
@@ -439,23 +465,42 @@ impl Supervisor {
                     break;
                 }
 
+                restart_count += 1;
+                if restart_count > restart_policy.max_restarts {
+                    tracing::error!(
+                        "[{svc_name}] crashed {} times — giving up",
+                        restart_policy.max_restarts
+                    );
+                    let _ = events.send(SupervisorEvent::StateChanged {
+                        service: svc_name.clone(),
+                        state: "failed".into(),
+                    });
+                    break;
+                }
+
+                let backoff = {
+                    let base = restart_policy.backoff.as_secs().max(1);
+                    let exp = base.saturating_pow(restart_count).min(
+                        restart_policy.max_backoff.as_secs(),
+                    );
+                    std::time::Duration::from_secs(exp)
+                };
+
                 let code = exit_status.and_then(|s| s.code());
                 tracing::warn!(
-                    "[{svc_name}] exited (code={}) — restarting in {backoff_secs}s ({restart_count}/{MAX_RESTARTS})",
-                    code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                    "[{svc_name}] exited (code={}) — restarting in {}s ({restart_count}/{})",
+                    code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+                    backoff.as_secs(),
+                    restart_policy.max_restarts,
                 );
                 let _ = events.send(SupervisorEvent::StateChanged {
                     service: svc_name.clone(),
                     state: "restarting".into(),
                 });
 
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                #[allow(unused_assignments)]
-                {
-                    backoff_secs = (backoff_secs * 2).min(30);
-                }
+                tokio::time::sleep(backoff).await;
 
-                let svc_def = match config.service.get(&svc_name) {
+                let svc_def = match config_cell.read().unwrap().service.get(&svc_name) {
                     Some(s) => s.clone(),
                     None => break,
                 };
@@ -504,7 +549,6 @@ impl Supervisor {
                                 events.clone(),
                             );
                         }
-                        backoff_secs = 1;
                         restart_count = 0;
                     }
                     Err(e) => {
@@ -526,7 +570,7 @@ impl Supervisor {
     ) -> std::sync::mpsc::SyncSender<()> {
         let handles = self.handles.clone();
         let events = self.events.clone();
-        let config = self.config.clone();
+        let config_cell = self.config.clone();
         let log = self.log.clone();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
@@ -556,7 +600,7 @@ impl Supervisor {
                     state: "restarting".into(),
                 });
 
-                let svc_def = match config.service.get(&changed_svc) {
+                let svc_def = match config_cell.read().unwrap().service.get(&changed_svc) {
                     Some(s) => s.clone(),
                     None => continue,
                 };
@@ -597,5 +641,55 @@ impl Supervisor {
         });
 
         stop_tx
+    }
+
+    /// Hot-reload: apply a new config without a full restart.
+    ///
+    /// - Services removed from the new config (or newly `disabled`) are stopped.
+    /// - Services whose config changed are restarted.
+    /// - Services newly added (and not `disabled`) are started.
+    /// - Unchanged running services are left alone.
+    pub async fn reload(&self, new_config: Arc<DevConfig>) -> Result<()> {
+        let old_config = self.cfg();
+
+        // 1. Stop removed / newly-disabled services.
+        for name in old_config.service.keys() {
+            let gone = !new_config.service.contains_key(name);
+            let disabled = new_config.service.get(name).is_some_and(|s| s.disabled);
+            if gone || disabled {
+                tracing::info!("[{name}] stopping — removed or disabled in reloaded config");
+                self.stop_service(name).await;
+            }
+        }
+
+        // 2. Swap in the new config so start_service / restart_service see it.
+        *self.config.write().unwrap() = Arc::clone(&new_config);
+
+        // 3. Restart changed services and start new ones in dependency order.
+        let graph = DependencyGraph::from_config(&new_config)?;
+        for (idx, name) in graph.start_order().iter().enumerate() {
+            let Some(new_svc) = new_config.service.get(name) else {
+                continue;
+            };
+            if new_svc.disabled {
+                continue;
+            }
+            match old_config.service.get(name) {
+                Some(old_svc) if old_svc == new_svc => {
+                    // Unchanged — leave running.
+                }
+                Some(_) => {
+                    tracing::info!("[{name}] config changed — restarting");
+                    self.restart_service(name).await?;
+                }
+                None => {
+                    tracing::info!("[{name}] new service — starting");
+                    self.start_service(name, idx).await?;
+                }
+            }
+        }
+
+        tracing::info!("config reloaded ({} services)", new_config.service.len());
+        Ok(())
     }
 }

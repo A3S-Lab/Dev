@@ -184,4 +184,22 @@ mod tests {
         let routes = router.routes.read().await;
         assert_eq!(routes.get("web").copied(), Some(3001));
     }
+
+    #[tokio::test]
+    async fn test_empty_router_has_no_routes() {
+        let router = ProxyRouter::new(0);
+        assert!(router.routes.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_subdomains_independent() {
+        let router = ProxyRouter::new(0);
+        router.update("alpha".into(), 1000).await;
+        router.update("beta".into(), 2000).await;
+        router.update("gamma".into(), 3000).await;
+        let routes = router.routes.read().await;
+        assert_eq!(routes.get("alpha").copied(), Some(1000));
+        assert_eq!(routes.get("beta").copied(), Some(2000));
+        assert_eq!(routes.get("gamma").copied(), Some(3000));
+    }
 }

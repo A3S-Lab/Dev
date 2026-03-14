@@ -116,6 +116,8 @@ mod tests {
             depends_on: vec![],
             watch: None,
             health: None,
+            restart: Default::default(),
+            stop_timeout: std::time::Duration::from_secs(5),
             disabled: false,
         }
     }

@@ -188,6 +188,15 @@ service "<name>" {
     timeout  = "1s"      # Per-check timeout (default: 1s)
     retries  = 5         # Retries before giving up (default: 3)
   }
+
+  stop_timeout = "10s"   # Grace period before SIGKILL (default: 5s)
+
+  restart {              # Crash-recovery policy (optional)
+    max_restarts = 10    # Max restarts before giving up (default: 10)
+    backoff      = "1s"  # Initial backoff delay (default: 1s, exponential)
+    max_backoff  = "30s" # Maximum backoff delay (default: 30s)
+    on_failure   = "restart"  # "restart" (default) or "stop"
+  }
 }
 ```
 
@@ -235,12 +244,10 @@ just fmt
 - [x] **Ongoing health monitoring** — continuous background health check loop; 3 consecutive failures → `unhealthy` state + SIGTERM + crash-recovery restart; recovers to `running` on success; monitor re-armed after each crash-recovery restart
 - [x] **File watcher `watcher_stop` leak fixed** — watcher stop sender is now propagated to restarted service handles; `stop_service()` correctly cancels the OS watcher after file-watcher-triggered restarts
 
-### Planned 📋
-
-- [ ] SIGHUP config reload — apply changes to `A3sfile.hcl` without a full restart
-- [ ] Per-service restart policy — configurable `max_restarts`, `backoff`, and `on_failure` behavior in `A3sfile.hcl`
-- [ ] Graceful shutdown timeout — configurable per-service grace period before SIGKILL
-- [ ] Test coverage — `supervisor`, `proxy`, `watcher`, `box_mgr` modules have no unit tests
+- [x] **SIGHUP config reload** — send `SIGHUP` to the daemon to reload `A3sfile.hcl`; stops removed/disabled services, restarts changed services, starts new services, unchanged services keep running
+- [x] **Per-service restart policy** — `restart {}` block with `max_restarts` (default 10), `backoff` (default 1s), `max_backoff` (default 30s), `on_failure = "restart"|"stop"`; exponential backoff; `on_failure = "stop"` leaves service stopped after crash
+- [x] **Graceful shutdown timeout** — `stop_timeout` field (default 5s); SIGTERM sent first, SIGKILL after timeout
+- [x] **Test coverage** — unit tests added for `config`, `graph`, `proxy`, `watcher` modules (64 tests total)
 
 ## License
 

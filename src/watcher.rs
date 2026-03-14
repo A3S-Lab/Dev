@@ -68,3 +68,99 @@ pub fn spawn_watcher(
 
     stop_tx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_spawn_watcher_returns_stop_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(1);
+        let stop_tx = spawn_watcher(
+            "svc".into(),
+            vec![dir.path().to_path_buf()],
+            vec![],
+            tx,
+        );
+        // Sending stop should not panic
+        let _ = stop_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_stop_sender_terminates_watcher_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+        let stop_tx = spawn_watcher(
+            "svc".into(),
+            vec![dir.path().to_path_buf()],
+            vec![],
+            tx,
+        );
+
+        // Stop the watcher thread
+        let _ = stop_tx.send(());
+        // Allow the thread to exit
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // rx should yield nothing (tx is dropped when thread exits)
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_change_triggers_event() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+        let stop_tx = spawn_watcher(
+            "my-svc".into(),
+            vec![dir.path().to_path_buf()],
+            vec![],
+            tx,
+        );
+
+        // Brief pause so the watcher is set up before we write
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let file = dir.path().join("test.txt");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(f, "change").unwrap();
+        drop(f);
+
+        // Wait for debounce + event propagation
+        let result = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        let _ = stop_tx.send(());
+        assert!(
+            matches!(result, Ok(Some(ref s)) if s == "my-svc"),
+            "expected file change event for 'my-svc', got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ignored_paths_suppressed() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+        let stop_tx = spawn_watcher(
+            "svc".into(),
+            vec![dir.path().to_path_buf()],
+            vec!["target".into()], // ignore "target" subdirectory
+            tx,
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Write into the ignored path
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let mut f = std::fs::File::create(target.join("ignored.txt")).unwrap();
+        writeln!(f, "ignored").unwrap();
+        drop(f);
+
+        // No event should arrive within a short window
+        let result =
+            tokio::time::timeout(Duration::from_millis(700), rx.recv()).await;
+        let _ = stop_tx.send(());
+        assert!(result.is_err(), "should not have received event for ignored path");
+    }
+}

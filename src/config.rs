@@ -39,7 +39,7 @@ fn default_log_level() -> String {
     "info".into()
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ServiceDef {
     pub cmd: String,
     #[serde(default)]
@@ -61,12 +61,55 @@ pub struct ServiceDef {
     pub watch: Option<WatchConfig>,
     #[serde(default)]
     pub health: Option<HealthConfig>,
+    #[serde(default)]
+    pub restart: RestartConfig,
+    /// How long to wait for SIGTERM before sending SIGKILL (default: 5s).
+    #[serde(default = "default_stop_timeout", with = "duration_serde")]
+    pub stop_timeout: Duration,
     /// If true, this service is skipped entirely (not started, not validated for deps).
     #[serde(default)]
     pub disabled: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+/// Crash-recovery restart policy for a service.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct RestartConfig {
+    /// Maximum number of restarts before giving up (default: 10).
+    #[serde(default = "default_max_restarts")]
+    pub max_restarts: u32,
+    /// Initial backoff delay between restarts (default: 1s).
+    #[serde(default = "default_backoff", with = "duration_serde")]
+    pub backoff: Duration,
+    /// Maximum backoff delay (default: 30s).
+    #[serde(default = "default_max_backoff", with = "duration_serde")]
+    pub max_backoff: Duration,
+    /// What to do when the service fails: "restart" (default) or "stop".
+    #[serde(default)]
+    pub on_failure: OnFailure,
+}
+
+impl Default for RestartConfig {
+    fn default() -> Self {
+        Self {
+            max_restarts: default_max_restarts(),
+            backoff: default_backoff(),
+            max_backoff: default_max_backoff(),
+            on_failure: OnFailure::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnFailure {
+    /// Restart the service with exponential backoff (default).
+    #[default]
+    Restart,
+    /// Leave the service stopped after it fails.
+    Stop,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct WatchConfig {
     pub paths: Vec<PathBuf>,
     #[serde(default)]
@@ -79,7 +122,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct HealthConfig {
     #[serde(rename = "type")]
     pub kind: HealthKind,
@@ -108,6 +151,18 @@ fn default_timeout() -> Duration {
 }
 fn default_retries() -> u32 {
     3
+}
+fn default_max_restarts() -> u32 {
+    10
+}
+fn default_backoff() -> Duration {
+    Duration::from_secs(1)
+}
+fn default_max_backoff() -> Duration {
+    Duration::from_secs(30)
+}
+fn default_stop_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
 mod duration_serde {
@@ -236,6 +291,8 @@ mod tests {
             depends_on: depends_on.into_iter().map(|s| s.to_string()).collect(),
             watch: None,
             health: None,
+            restart: Default::default(),
+            stop_timeout: std::time::Duration::from_secs(5),
             disabled: false,
         }
     }
@@ -364,5 +421,74 @@ service "web" {
     fn test_default_proxy_port() {
         let cfg: DevConfig = hcl::from_str("").unwrap();
         assert_eq!(cfg.dev.proxy_port, 7080);
+    }
+
+    #[test]
+    fn test_stop_timeout_default() {
+        let src = r#"service "api" { cmd = "echo" }"#;
+        let cfg: DevConfig = hcl::from_str(src).unwrap();
+        assert_eq!(
+            cfg.service["api"].stop_timeout,
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn test_stop_timeout_custom() {
+        let src = r#"
+service "api" {
+  cmd          = "echo"
+  stop_timeout = "10s"
+}"#;
+        let cfg: DevConfig = hcl::from_str(src).unwrap();
+        assert_eq!(
+            cfg.service["api"].stop_timeout,
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn test_restart_config_defaults() {
+        let src = r#"service "api" { cmd = "echo" }"#;
+        let cfg: DevConfig = hcl::from_str(src).unwrap();
+        let r = &cfg.service["api"].restart;
+        assert_eq!(r.max_restarts, 10);
+        assert_eq!(r.backoff, std::time::Duration::from_secs(1));
+        assert_eq!(r.max_backoff, std::time::Duration::from_secs(30));
+        assert_eq!(r.on_failure, OnFailure::Restart);
+    }
+
+    #[test]
+    fn test_restart_config_custom() {
+        let src = r#"
+service "api" {
+  cmd = "echo"
+  restart {
+    max_restarts = 3
+    backoff      = "2s"
+    max_backoff  = "60s"
+    on_failure   = "stop"
+  }
+}"#;
+        let cfg: DevConfig = hcl::from_str(src).unwrap();
+        let r = &cfg.service["api"].restart;
+        assert_eq!(r.max_restarts, 3);
+        assert_eq!(r.backoff, std::time::Duration::from_secs(2));
+        assert_eq!(r.max_backoff, std::time::Duration::from_secs(60));
+        assert_eq!(r.on_failure, OnFailure::Stop);
+    }
+
+    #[test]
+    fn test_service_def_partial_eq_same() {
+        let a = make_svc(3000, vec![]);
+        let b = make_svc(3000, vec![]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_service_def_partial_eq_different_port() {
+        let a = make_svc(3000, vec![]);
+        let b = make_svc(3001, vec![]);
+        assert_ne!(a, b);
     }
 }

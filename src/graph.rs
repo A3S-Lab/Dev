@@ -88,6 +88,8 @@ mod tests {
                     depends_on: deps.iter().map(|s| s.to_string()).collect(),
                     watch: None,
                     health: None,
+                    restart: Default::default(),
+                    stop_timeout: std::time::Duration::from_secs(5),
                     disabled: false,
                 },
             );
@@ -110,5 +112,41 @@ mod tests {
     fn test_cycle_detected() {
         let cfg = make_config(vec![("a", vec!["b"]), ("b", vec!["a"])]);
         assert!(DependencyGraph::from_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_stop_order_is_reverse_of_start() {
+        // b depends on a → start [a, b], stop [b, a]
+        let cfg = make_config(vec![("b", vec!["a"]), ("a", vec![])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let start: Vec<&str> = g.start_order().iter().map(|s| s.as_str()).collect();
+        let stop: Vec<&str> = g.stop_order().collect();
+        assert_eq!(start, stop.iter().rev().copied().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_no_deps_preserves_declaration_order() {
+        let cfg = make_config(vec![("alpha", vec![]), ("beta", vec![]), ("gamma", vec![])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let order = g.start_order();
+        assert_eq!(order, &["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_chain_three() {
+        // c → b → a: start order must be a, b, c
+        let cfg = make_config(vec![("c", vec!["b"]), ("b", vec!["a"]), ("a", vec![])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let order = g.start_order();
+        let pos = |s: &str| order.iter().position(|x| x == s).unwrap();
+        assert!(pos("a") < pos("b"));
+        assert!(pos("b") < pos("c"));
+    }
+
+    #[test]
+    fn test_empty_config() {
+        let cfg = make_config(vec![]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        assert!(g.start_order().is_empty());
     }
 }
