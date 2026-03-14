@@ -37,10 +37,7 @@ just build
 ## Quick start
 
 ```bash
-# Create an A3sfile.hcl in the current directory
-a3s init
-
-# Edit A3sfile.hcl, then start all services
+# Create an A3sfile.hcl in the current directory, then start all services
 a3s up
 
 # Start in background
@@ -126,7 +123,6 @@ service "db" {
 | `a3s validate` | Validate A3sfile.hcl without starting anything |
 | `a3s validate --strict` | Also check binaries exist on PATH and ports are free |
 | `a3s top [--interval N]` | Live CPU% and memory view per service (default: 2s refresh) |
-| `a3s init` | Generate a new A3sfile.hcl (auto-detects project type) |
 
 ### A3S ecosystem tools
 
@@ -283,8 +279,7 @@ just fmt
 - [x] **`pre_start` / `post_stop` hooks** — optional shell commands run before a service starts (abort on non-zero exit) and after it stops; run in the service's working directory with its environment
 - [x] **Env var interpolation** — `${VAR}` placeholders in `cmd`, `env` values, and hook commands are replaced with OS environment variable values at config load time; unknown variables are preserved as-is; 93 tests total
 - [x] **`a3s validate --strict`** — additionally checks that every service's binary exists on `PATH` and that fixed ports are not already bound; exits non-zero if any check fails
-- [x] **`a3s top`** — live CPU% and RSS memory view per service, polling the running daemon every 2 seconds (configurable with `--interval`); reads stats via `ps`
-- [x] **`a3s init` project detection** — detects Node.js (`package.json`), Rust (`Cargo.toml`), Go (`go.mod`), or Python (`pyproject.toml`/`requirements.txt`) and generates a tailored `A3sfile.hcl` template; falls back to the generic template for unknown projects; 103 tests total
+- [x] **`a3s top`** — live CPU% and RSS memory view per service, polling the running daemon every 2 seconds (configurable with `--interval`); reads stats via `ps`; 97 tests total
 
 ## License
 
