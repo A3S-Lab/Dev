@@ -1,8 +1,21 @@
 use std::path::PathBuf;
 
-/// Default socket path for IPC between `a3s up` and other commands.
-pub fn socket_path() -> PathBuf {
-    std::env::temp_dir().join("a3s-dev.sock")
+/// Return a project-specific socket path derived from the canonical directory
+/// that contains `config_path`. Two projects on the same machine get distinct
+/// sockets so their daemons never interfere with each other.
+pub fn socket_path(config_path: &std::path::Path) -> PathBuf {
+    let dir = config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let canonical =
+        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    // djb2 hash of the canonical path string
+    let s = canonical.to_string_lossy();
+    let mut h: u64 = 5381;
+    for b in s.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(u64::from(b));
+    }
+    std::env::temp_dir().join(format!("a3s-{:08x}.sock", h as u32))
 }
 
 /// IPC request from client commands to the running daemon.
@@ -52,6 +65,20 @@ pub struct StatusRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_socket_path_differs_per_project() {
+        let a = socket_path(std::path::Path::new("/tmp/proj_a/A3sfile.hcl"));
+        let b = socket_path(std::path::Path::new("/tmp/proj_b/A3sfile.hcl"));
+        assert_ne!(a, b, "different projects must get different socket paths");
+    }
+
+    #[test]
+    fn test_socket_path_same_project_is_stable() {
+        let a = socket_path(std::path::Path::new("/tmp/myproj/A3sfile.hcl"));
+        let b = socket_path(std::path::Path::new("/tmp/myproj/A3sfile.hcl"));
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn test_request_status_roundtrip() {

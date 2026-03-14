@@ -20,7 +20,7 @@ fn encode(resp: &IpcResponse) -> Vec<u8> {
 
 /// Start the Unix socket IPC server. Handles status/stop/restart/logs/history requests.
 pub async fn serve(sup: Arc<Supervisor>) {
-    let path = socket_path();
+    let path = socket_path(&sup.config_path);
     let _ = std::fs::remove_file(&path);
 
     let listener = match UnixListener::bind(&path) {

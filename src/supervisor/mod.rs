@@ -135,8 +135,8 @@ type ConfigCell = Arc<std::sync::RwLock<Arc<DevConfig>>>;
 
 pub struct Supervisor {
     config: ConfigCell,
-    /// Path to A3sfile.hcl — used by `reload_from_disk`.
-    config_path: std::path::PathBuf,
+    /// Path to A3sfile.hcl — used by `reload_from_disk` and `socket_path`.
+    pub config_path: std::path::PathBuf,
     handles: Arc<RwLock<HashMap<String, ServiceHandle>>>,
     events: broadcast::Sender<SupervisorEvent>,
     log: Arc<LogAggregator>,
@@ -342,14 +342,21 @@ impl Supervisor {
         Ok(())
     }
 
-    pub async fn stop_all(&self) {
+    /// Stop all running services in reverse wave order, stopping each wave concurrently.
+    /// Services with no inter-dependencies within a wave stop in parallel.
+    pub async fn stop_all(self: &Arc<Self>) {
         let graph = match DependencyGraph::from_config(&self.cfg()) {
             Ok(g) => g,
             Err(_) => return,
         };
-        let names: Vec<String> = graph.stop_order().map(|s| s.to_string()).collect();
-        for name in &names {
-            self.stop_service(name).await;
+        for wave in graph.start_waves().iter().rev() {
+            let mut set = tokio::task::JoinSet::new();
+            for name in wave {
+                let sup = Arc::clone(self);
+                let name = name.clone();
+                set.spawn(async move { sup.stop_service(&name).await });
+            }
+            while set.join_next().await.is_some() {}
         }
     }
 
@@ -361,34 +368,49 @@ impl Supervisor {
             .map(|s| s.stop_timeout)
             .unwrap_or(std::time::Duration::from_secs(5));
 
-        let mut map = self.handles.write().await;
-        if let Some(h) = map.get_mut(name) {
-            // Cancel file watcher first
-            if let Some(ref stop_tx) = h.watcher_stop {
-                let _ = stop_tx.send(());
-            }
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{kill, Signal};
-                use nix::unistd::Pid;
-                if let Some(pid) = h.state.pid() {
-                    // Negative PID = kill the entire process group (pgid = pid since we
-                    // spawned with process_group(0)). This ensures child processes of wrappers
-                    // like `npm run dev` are also terminated, not just the wrapper itself.
-                    let pgid = Pid::from_raw(-(pid as i32));
-                    let _ = kill(pgid, Signal::SIGTERM);
-                    let _ = tokio::time::timeout(stop_timeout, h.child.wait()).await;
-                    // SIGKILL the group if still alive after grace period
-                    let _ = kill(pgid, Signal::SIGKILL);
+        // Extract what we need and mark stopped — all under a brief write lock.
+        // We do NOT hold the lock across the async wait so parallel stop calls
+        // (e.g. from stop_all) can run concurrently without blocking each other.
+        let extracted = {
+            let mut map = self.handles.write().await;
+            if let Some(h) = map.get_mut(name) {
+                if let Some(ref stop_tx) = h.watcher_stop {
+                    let _ = stop_tx.send(());
                 }
+                let pid = h.state.pid();
+                // Swap child out so we can await it without holding the lock.
+                let child = std::mem::replace(
+                    &mut h.child,
+                    tokio::process::Command::new("true").spawn().unwrap(),
+                );
+                h.state = ServiceState::Stopped;
+                Some((pid, child))
+            } else {
+                None
             }
-            let _ = h.child.kill().await;
-            h.state = ServiceState::Stopped;
-            self.emit(SupervisorEvent::StateChanged {
-                service: name.to_string(),
-                state: "stopped".into(),
-            });
+        }; // write lock dropped here
+
+        self.emit(SupervisorEvent::StateChanged {
+            service: name.to_string(),
+            state: "stopped".into(),
+        });
+
+        let Some((pid_opt, mut child)) = extracted else {
+            return;
+        };
+
+        #[cfg(unix)]
+        if let Some(pid) = pid_opt {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            // Negative PID kills the entire process group (pgid = pid since we
+            // spawned with process_group(0)).
+            let pgid = Pid::from_raw(-(pid as i32));
+            let _ = kill(pgid, Signal::SIGTERM);
+            let _ = tokio::time::timeout(stop_timeout, child.wait()).await;
+            let _ = kill(pgid, Signal::SIGKILL);
         }
+        let _ = child.kill().await;
     }
 
     /// Stop only the named services and any services that transitively depend on them,

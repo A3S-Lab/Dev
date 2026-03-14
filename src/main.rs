@@ -21,7 +21,7 @@ mod watcher;
 
 use config::DevConfig;
 use error::{DevError, Result};
-use ipc::{socket_path, IpcRequest, IpcResponse};
+use ipc::{IpcRequest, IpcResponse};
 use supervisor::Supervisor;
 
 #[derive(Parser)]
@@ -55,6 +55,12 @@ enum Commands {
         /// Web UI port
         #[arg(long, default_value_t = ui::DEFAULT_UI_PORT)]
         ui_port: u16,
+        /// Wait for all services to become healthy before returning (requires --detach)
+        #[arg(long)]
+        wait: bool,
+        /// Timeout in seconds for --wait (default: 60)
+        #[arg(long, default_value_t = 60)]
+        wait_timeout: u64,
     },
     /// Stop all (or named) services
     Down {
@@ -63,8 +69,13 @@ enum Commands {
     },
     /// Restart a service
     Restart { service: String },
-    /// Show service status
-    Status,
+    /// Show service status (alias: ps)
+    #[command(alias = "ps")]
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Tail logs (all services or one)
     Logs {
         /// Filter to a specific service
@@ -147,12 +158,17 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // Project-specific socket path — computed once and used by all IPC client commands.
+    let sock = ipc::socket_path(&cli.file);
+
     match &cli.command {
         Commands::Up {
             services,
             detach,
             no_ui,
             ui_port,
+            wait,
+            wait_timeout,
         } => {
             if *detach {
                 // Re-launch self as background daemon, dropping --detach flag
@@ -178,8 +194,14 @@ async fn run(cli: Cli) -> Result<()> {
                     .map_err(|e| DevError::Config(format!("failed to daemonize: {e}")))?;
 
                 println!("{} a3s daemon started in background", "✓".green());
-                println!("  run {} to check status", "a3s status".cyan());
-                println!("  run {} to stop", "a3s down".cyan());
+                if *wait {
+                    println!("{} waiting for services to become healthy...", "→".cyan());
+                    wait_for_healthy(&sock, *wait_timeout).await?;
+                    println!("{} all services healthy", "✓".green());
+                } else {
+                    println!("  run {} to check status", "a3s status".cyan());
+                    println!("  run {} to stop", "a3s down".cyan());
+                }
                 return Ok(());
             }
 
@@ -243,8 +265,8 @@ async fn run(cli: Cli) -> Result<()> {
             tokio::signal::ctrl_c().await.ok();
 
             println!("\n{} shutting down...", "→".yellow());
-            sup.stop_all().await;
-            let _ = std::fs::remove_file(socket_path());
+            sup.clone().stop_all().await;
+            let _ = std::fs::remove_file(&sock);
         }
 
         Commands::Init => {
@@ -323,74 +345,88 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{} dependency graph OK", "✓".green());
         }
 
-        Commands::Status => {
-            let resp = ipc_send(IpcRequest::Status).await?;
+        Commands::Status { json } => {
+            let resp = ipc_send(IpcRequest::Status, &sock).await?;
             if let IpcResponse::Status { rows } = resp {
-                println!(
-                    "{:<16} {:<12} {:<8} {:<6} {:<24} {}",
-                    "SERVICE".bold(),
-                    "STATE".bold(),
-                    "PID".bold(),
-                    "PORT".bold(),
-                    "URL".bold(),
-                    "UPTIME".bold(),
-                );
-                println!("{}", "─".repeat(72).dimmed());
-                for row in rows {
-                    let state_colored = match row.state.as_str() {
-                        "running" => row.state.green().to_string(),
-                        "starting" | "restarting" => row.state.yellow().to_string(),
-                        "unhealthy" | "failed" => row.state.red().to_string(),
-                        _ => row.state.dimmed().to_string(),
-                    };
-                    let url = row
-                        .subdomain
-                        .map(|s| format!("http://{s}.localhost"))
-                        .unwrap_or_default();
-                    let uptime = row
-                        .uptime_secs
-                        .map(format_uptime)
-                        .unwrap_or_else(|| "-".into());
+                if *json {
                     println!(
-                        "{:<16} {:<20} {:<8} {:<6} {:<24} {}",
-                        row.name,
-                        state_colored,
-                        row.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
-                        if row.port == 0 {
-                            "auto".into()
-                        } else {
-                            row.port.to_string()
-                        },
-                        url.dimmed(),
-                        uptime.dimmed(),
+                        "{}",
+                        serde_json::to_string_pretty(&rows)
+                            .map_err(|e| DevError::Config(format!("json: {e}")))?
                     );
+                } else {
+                    println!(
+                        "{:<16} {:<12} {:<8} {:<6} {:<24} {}",
+                        "SERVICE".bold(),
+                        "STATE".bold(),
+                        "PID".bold(),
+                        "PORT".bold(),
+                        "URL".bold(),
+                        "UPTIME".bold(),
+                    );
+                    println!("{}", "─".repeat(72).dimmed());
+                    for row in rows {
+                        let state_colored = match row.state.as_str() {
+                            "running" => row.state.green().to_string(),
+                            "starting" | "restarting" => row.state.yellow().to_string(),
+                            "unhealthy" | "failed" => row.state.red().to_string(),
+                            _ => row.state.dimmed().to_string(),
+                        };
+                        let url = row
+                            .subdomain
+                            .map(|s| format!("http://{s}.localhost"))
+                            .unwrap_or_default();
+                        let uptime = row
+                            .uptime_secs
+                            .map(format_uptime)
+                            .unwrap_or_else(|| "-".into());
+                        println!(
+                            "{:<16} {:<20} {:<8} {:<6} {:<24} {}",
+                            row.name,
+                            state_colored,
+                            row.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                            if row.port == 0 {
+                                "auto".into()
+                            } else {
+                                row.port.to_string()
+                            },
+                            url.dimmed(),
+                            uptime.dimmed(),
+                        );
+                    }
                 }
             }
         }
 
         Commands::Down { services } => {
-            ipc_send(IpcRequest::Stop {
-                services: services.clone(),
-            })
+            ipc_send(
+                IpcRequest::Stop {
+                    services: services.clone(),
+                },
+                &sock,
+            )
             .await?;
             println!("{} stopped", "✓".green());
         }
 
         Commands::Restart { service } => {
-            ipc_send(IpcRequest::Restart {
-                service: service.clone(),
-            })
+            ipc_send(
+                IpcRequest::Restart {
+                    service: service.clone(),
+                },
+                &sock,
+            )
             .await?;
             println!("{} restarted {}", "✓".green(), service.cyan());
         }
 
         Commands::Reload => {
-            ipc_send(IpcRequest::Reload).await?;
+            ipc_send(IpcRequest::Reload, &sock).await?;
             println!("{} config reloaded", "✓".green());
         }
 
         Commands::Logs { service, follow, grep, last } => {
-            stream_logs(service.clone(), *follow, grep.clone(), *last).await?;
+            stream_logs(service.clone(), *follow, grep.clone(), *last, &sock).await?;
         }
 
         Commands::Upgrade => {
@@ -603,8 +639,51 @@ async fn proxy_tool(alias: &str, args: &[String]) -> Result<()> {
     })
 }
 
-async fn ipc_send(req: IpcRequest) -> Result<IpcResponse> {
-    let stream = UnixStream::connect(socket_path())
+/// Poll the daemon via IPC until all services are healthy or the timeout expires.
+/// Used by `a3s up --detach --wait`.
+async fn wait_for_healthy(sock: &std::path::Path, timeout_secs: u64) -> Result<()> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    // Wait for socket to appear (daemon may still be starting)
+    loop {
+        if sock.exists() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(DevError::Config(
+                "timeout: daemon did not start in time".into(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(DevError::Config(
+                "timeout: services did not become healthy in time".into(),
+            ));
+        }
+        if let Ok(IpcResponse::Status { rows }) = ipc_send(IpcRequest::Status, sock).await {
+            if rows.iter().any(|r| r.state == "failed") {
+                return Err(DevError::Config(
+                    "one or more services failed to start".into(),
+                ));
+            }
+            let all_settled = rows
+                .iter()
+                .all(|r| matches!(r.state.as_str(), "running" | "stopped" | "failed"));
+            if all_settled {
+                return Ok(());
+            }
+        }
+        // socket not ready yet or non-Status response — retry
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+async fn ipc_send(req: IpcRequest, sock: &std::path::Path) -> Result<IpcResponse> {
+    let stream = UnixStream::connect(sock)
         .await
         .map_err(|_| DevError::Config("no running a3s daemon — run `a3s up` first".into()))?;
 
@@ -627,10 +706,11 @@ async fn stream_logs(
     follow: bool,
     grep: Option<String>,
     last: usize,
+    sock: &std::path::Path,
 ) -> Result<()> {
     // First replay history
     {
-        let stream = UnixStream::connect(socket_path())
+        let stream = UnixStream::connect(sock)
             .await
             .map_err(|_| DevError::Config("no running a3s daemon — run `a3s up` first".into()))?;
         let (reader, mut writer) = tokio::io::split(stream);
@@ -667,7 +747,7 @@ async fn stream_logs(
     }
 
     // Then stream live
-    let stream = UnixStream::connect(socket_path())
+    let stream = UnixStream::connect(sock)
         .await
         .map_err(|_| DevError::Config("no running a3s daemon — run `a3s up` first".into()))?;
     let (reader, mut writer) = tokio::io::split(stream);

@@ -111,10 +111,12 @@ service "db" {
 |---------|-------------|
 | `a3s up [services]` | Start all (or named) services in dependency order |
 | `a3s up --detach` | Start as background daemon |
+| `a3s up --detach --wait` | Start daemon, block until all services healthy |
 | `a3s down [services]` | Stop all (or named) services |
 | `a3s restart <service>` | Restart a service |
 | `a3s reload` | Reload A3sfile.hcl without restarting unchanged services |
-| `a3s status` | Show service status table |
+| `a3s status` / `a3s ps` | Show service status table |
+| `a3s status --json` | Machine-readable JSON status |
 | `a3s logs [--service name]` | Tail logs (all or one service) |
 | `a3s logs --grep <keyword>` | Filter log output by keyword |
 | `a3s logs --last N` | Show last N lines of history (default: 200) |
@@ -259,7 +261,12 @@ just fmt
 - [x] **Process group killing** — services are spawned in their own process group; SIGTERM/-SIGKILL are sent to the entire group so wrapper commands (`npm run dev`, `cargo watch`) kill all child processes, not just the wrapper
 - [x] **`a3s reload`** — sends a reload request via IPC; equivalent to `kill -HUP` without needing the daemon PID; stops removed/disabled services, restarts changed, starts new
 - [x] **`a3s down <services>` stops dependents first** — `a3s down db` automatically stops `api` (and anything else that depends on db) in safe order before stopping db
-- [x] **`log_file` config option** — `log_file = "logs/api.log"` in a service block writes stdout/stderr to disk (append mode, relative to A3sfile.hcl directory); 81 tests total
+- [x] **`log_file` config option** — `log_file = "logs/api.log"` in a service block writes stdout/stderr to disk (append mode, relative to A3sfile.hcl directory)
+- [x] **Project isolation** — socket path is derived from a djb2 hash of the canonical project directory; two projects on the same machine get distinct sockets and never interfere
+- [x] **Parallel stop** — `stop_service` no longer holds the write lock across the async SIGTERM wait; `stop_all` stops each reverse-dependency wave concurrently (symmetric with parallel start)
+- [x] **`a3s up --detach --wait`** — blocks until all services reach `running` state; polls IPC every 500 ms; `--wait-timeout N` (default 60 s); exits non-zero if any service `failed`
+- [x] **`a3s ps`** — alias for `a3s status`
+- [x] **`a3s status --json`** — machine-readable JSON output for scripts and monitoring; 83 tests total
 
 ## License
 
