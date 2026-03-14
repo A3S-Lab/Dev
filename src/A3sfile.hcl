@@ -6,13 +6,6 @@ dev {
   log_level  = "info"
 }
 
-# brew {
-#   packages = [
-#     "redis",
-#     "postgresql@16",
-#   ]
-# }
-
 # service "api" {
 #   cmd        = "cargo run -p my-api"
 #   dir        = "./services/api"

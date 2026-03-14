@@ -12,15 +12,7 @@ pub struct DevConfig {
     #[serde(default)]
     pub dev: GlobalSettings,
     #[serde(default)]
-    pub brew: BrewConfig,
-    #[serde(default)]
     pub service: IndexMap<String, ServiceDef>,
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
-pub struct BrewConfig {
-    #[serde(default)]
-    pub packages: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,7 +247,6 @@ mod tests {
         }
         DevConfig {
             dev: GlobalSettings::default(),
-            brew: BrewConfig::default(),
             service: map,
         }
     }

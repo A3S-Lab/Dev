@@ -138,8 +138,9 @@ async fn status_macos() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn merge_kubeconfig_macos() -> Result<()> {
-    let home = dirs_next::home_dir()
-        .ok_or_else(|| DevError::Config("cannot determine home directory".into()))?;
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map_err(|_| DevError::Config("HOME environment variable not set".into()))?;
     let kube_dir = home.join(".kube");
     tokio::fs::create_dir_all(&kube_dir)
         .await
@@ -202,8 +203,9 @@ async fn start_linux() -> Result<()> {
     run("sudo", &["systemctl", "start", "k3s"]).await?;
     run("sudo", &["systemctl", "enable", "k3s"]).await?;
 
-    let home = dirs_next::home_dir()
-        .ok_or_else(|| DevError::Config("cannot determine home directory".into()))?;
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map_err(|_| DevError::Config("HOME environment variable not set".into()))?;
     let kube_dir = home.join(".kube");
     tokio::fs::create_dir_all(&kube_dir)
         .await

@@ -7,8 +7,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 mod box_mgr;
-mod brew;
-mod code;
 mod config;
 mod error;
 mod graph;
@@ -85,34 +83,12 @@ enum Commands {
     Validate,
     /// Upgrade a3s to the latest version
     Upgrade,
-    /// Add a Homebrew package to A3sfile.hcl and install it
-    Add {
-        /// Package name(s) to add
-        packages: Vec<String>,
-    },
-    /// Remove a Homebrew package from A3sfile.hcl and uninstall it
-    Remove {
-        /// Package name(s) to remove
-        packages: Vec<String>,
-    },
-    /// Search for Homebrew packages
-    Search {
-        /// Search query
-        query: String,
-    },
-    /// Install all brew packages declared in A3sfile.hcl
-    Install,
-    /// List all installed a3s ecosystem tools and brew packages
+    /// List all installed a3s ecosystem tools
     List,
     /// Update installed a3s ecosystem tools (all if no names given)
     Update {
         /// Tool name(s) to update: box, gateway, power (default: all)
         tools: Vec<String>,
-    },
-    /// a3s-code agent scaffolding
-    Code {
-        #[command(subcommand)]
-        cmd: CodeCommands,
     },
     /// Run a command in a service's environment and directory
     Exec {
@@ -139,16 +115,6 @@ enum Commands {
     /// Proxy to an a3s ecosystem tool (e.g. `a3s box`, `a3s gateway`)
     #[command(external_subcommand)]
     Tool(Vec<String>),
-}
-
-#[derive(Subcommand)]
-enum CodeCommands {
-    /// Scaffold a new a3s-code agent project
-    Init {
-        /// Directory to create the project in (default: current directory)
-        #[arg(default_value = ".")]
-        dir: std::path::PathBuf,
-    },
 }
 
 #[derive(Subcommand)]
@@ -228,12 +194,6 @@ async fn run(cli: Cli) -> Result<()> {
             }
 
             let cfg = Arc::new(DevConfig::from_file(&cli.file)?);
-
-            // Install missing brew packages before starting services
-            let missing = brew::missing_packages(&cfg.brew.packages);
-            if !missing.is_empty() {
-                brew::install_packages(&missing).await?;
-            }
 
             // Start proxy
             let proxy = Arc::new(proxy::ProxyRouter::new(cfg.dev.proxy_port));
@@ -345,14 +305,10 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Validate => {
             let cfg = Arc::new(DevConfig::from_file(&cli.file)?);
             println!(
-                "{} A3sfile.hcl is valid ({} services, {} brew packages)",
+                "{} A3sfile.hcl is valid ({} services)",
                 "✓".green(),
                 cfg.service.len(),
-                cfg.brew.packages.len()
             );
-            if !cfg.brew.packages.is_empty() {
-                println!("  brew: {}", cfg.brew.packages.join(", ").dimmed());
-            }
             for (name, svc) in &cfg.service {
                 let deps = if svc.depends_on.is_empty() {
                     String::new()
@@ -453,67 +409,6 @@ async fn run(cli: Cli) -> Result<()> {
                 .map_err(|e| DevError::Config(e.to_string()))?;
         }
 
-        Commands::Add { packages } => {
-            if packages.is_empty() {
-                return Err(DevError::Config("specify at least one package".into()));
-            }
-            let mut cfg = DevConfig::from_file(&cli.file)?;
-            let mut added = vec![];
-            for pkg in packages {
-                if brew::add_to_list(&mut cfg.brew.packages, pkg) {
-                    added.push(pkg.clone());
-                } else {
-                    println!("  {} {} already in A3sfile.hcl", "·".dimmed(), pkg.cyan());
-                }
-            }
-            if !added.is_empty() {
-                brew::write_brew_block(&cli.file, &cfg.brew.packages)?;
-                brew::install_packages(&added).await?;
-                println!("{} added: {}", "✓".green(), added.join(", ").cyan());
-            }
-        }
-
-        Commands::Remove { packages } => {
-            if packages.is_empty() {
-                return Err(DevError::Config("specify at least one package".into()));
-            }
-            let mut cfg = DevConfig::from_file(&cli.file)?;
-            let mut removed = vec![];
-            for pkg in packages {
-                if brew::remove_from_list(&mut cfg.brew.packages, pkg) {
-                    removed.push(pkg.clone());
-                } else {
-                    println!("  {} {} not in A3sfile.hcl", "·".dimmed(), pkg.cyan());
-                }
-            }
-            if !removed.is_empty() {
-                brew::write_brew_block(&cli.file, &cfg.brew.packages)?;
-                for pkg in &removed {
-                    brew::uninstall_package(pkg).await?;
-                }
-                println!("{} removed: {}", "✓".green(), removed.join(", ").cyan());
-            }
-        }
-
-        Commands::Search { query } => {
-            brew::search_packages(query).await?;
-        }
-
-        Commands::Install => {
-            let cfg = DevConfig::from_file(&cli.file)?;
-            if cfg.brew.packages.is_empty() {
-                println!("{} no brew packages declared", "·".dimmed());
-                return Ok(());
-            }
-            let missing = brew::missing_packages(&cfg.brew.packages);
-            if missing.is_empty() {
-                println!("{} all brew packages already installed", "✓".green());
-            } else {
-                brew::install_packages(&missing).await?;
-                println!("{} installed {} package(s)", "✓".green(), missing.len());
-            }
-        }
-
         Commands::List => {
             // a3s ecosystem tools
             let tools = [
@@ -537,24 +432,6 @@ async fn run(cli: Cli) -> Result<()> {
                     "not installed".dimmed().to_string()
                 };
                 println!("{:<12} {:<16} {}", alias, binary, status);
-            }
-
-            // brew packages from A3sfile.hcl
-            if let Ok(cfg) = DevConfig::from_file(&cli.file) {
-                if !cfg.brew.packages.is_empty() {
-                    println!();
-                    println!("{}", "brew packages:".bold());
-                    for pkg in &cfg.brew.packages {
-                        let installed =
-                            brew::missing_packages(std::slice::from_ref(pkg)).is_empty();
-                        let status = if installed {
-                            "installed".green().to_string()
-                        } else {
-                            "missing".yellow().to_string()
-                        };
-                        println!("  {:<20} {}", pkg.cyan(), status);
-                    }
-                }
             }
         }
 
@@ -660,31 +537,6 @@ async fn run(cli: Cli) -> Result<()> {
                 msg: err.to_string(),
             });
         }
-        Commands::Code { cmd } => match cmd {
-            CodeCommands::Init { dir } => {
-                println!("{} a3s-code agent scaffolding\r\n", "→".cyan());
-                let lang = code::prompt_language()?;
-                let project_name = dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("my-agent");
-                code::scaffold(dir, lang, project_name)?;
-                let lang_name = match lang {
-                    code::Language::Python => "Python",
-                    code::Language::TypeScript => "TypeScript",
-                };
-                println!(
-                    "{} scaffolded {} agent in {}\r\n",
-                    "✓".green(),
-                    lang_name.cyan(),
-                    dir.display()
-                );
-                println!("  config.hcl    — agent configuration");
-                println!("  skills/       — custom tool skills");
-                println!("  agents/       — agent runner scripts");
-            }
-        },
-
         Commands::Kube { cmd } => match cmd {
             KubeCommands::Start => kube::start().await?,
             KubeCommands::Stop => kube::stop().await?,

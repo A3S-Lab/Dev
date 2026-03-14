@@ -4,14 +4,15 @@ Local development orchestration tool for the A3S monorepo — and a unified CLI 
 
 ## What it does
 
-`a3s` is a single binary that replaces the need to juggle multiple terminals, process managers, and tool installers when working on A3S projects. It:
+`a3s` is a single binary that replaces the need to juggle multiple terminals and process managers when working on A3S projects. It:
 
 - Starts and supervises multiple services defined in `A3sfile.hcl`
-- Manages Homebrew dependencies declaratively
+- Restarts crashed services automatically with exponential backoff
+- Watches source files and hot-restarts services on change
+- Routes services to subdomains via a local reverse proxy
 - Proxies to A3S ecosystem tools (`a3s box`, `a3s gateway`, etc.), auto-installing them if missing
-- Deploys a local k3s Kubernetes cluster (Lima VM on macOS, systemd on Linux)
-- Scaffolds new `a3s-code` agent projects
-- Provides a web UI for real-time service monitoring
+- Manages a local k3s Kubernetes cluster (Lima VM on macOS, systemd on Linux)
+- Provides a web UI for real-time service and cluster monitoring
 
 ## Install
 
@@ -19,10 +20,19 @@ Local development orchestration tool for the A3S monorepo — and a unified CLI 
 brew install a3s-lab/tap/a3s
 ```
 
-Or build from source:
+Or build from source (requires the UI to be built first):
 
 ```bash
-cargo build --release -p a3s
+cd src/ui && npm install && npm run build
+cargo build --release
+```
+
+Or via `just`:
+
+```bash
+just ui-install
+just build-ui
+just build
 ```
 
 ## Quick start
@@ -56,10 +66,6 @@ dev {
   log_level  = "info"
 }
 
-brew {
-  packages = ["redis", "postgresql@16"]
-}
-
 service "api" {
   cmd        = "cargo run -p my-api"
   dir        = "./services/api"
@@ -85,6 +91,17 @@ service "api" {
     retries  = 5
   }
 }
+
+service "db" {
+  cmd  = "postgres -D /usr/local/var/postgresql@16"
+  port = 5432
+
+  health {
+    type    = "tcp"
+    timeout = "1s"
+    retries = 10
+  }
+}
 ```
 
 ## Commands
@@ -99,31 +116,12 @@ service "api" {
 | `a3s restart <service>` | Restart a service |
 | `a3s status` | Show service status table |
 | `a3s logs [--service name]` | Tail logs (all or one service) |
-| `a3s run <cmd>` | Run a one-off command with env from A3sfile.hcl |
+| `a3s logs --grep <keyword>` | Filter log output by keyword |
+| `a3s run <cmd>` | Run a one-off command with env merged from all services |
 | `a3s run --service <name> <cmd>` | Run with env from a specific service |
-| `a3s exec <service> -- <cmd>` | Run a command in a service's environment |
+| `a3s exec <service> -- <cmd>` | Run a command in a service's working directory and env |
 | `a3s validate` | Validate A3sfile.hcl without starting anything |
 | `a3s init` | Generate a new A3sfile.hcl |
-
-### Package management
-
-| Command | Description |
-|---------|-------------|
-| `a3s add <pkg>` | Add a Homebrew package to A3sfile.hcl and install it |
-| `a3s remove <pkg>` | Remove a Homebrew package from A3sfile.hcl and uninstall it |
-| `a3s search <query>` | Search Homebrew packages |
-| `a3s install` | Install all brew packages declared in A3sfile.hcl |
-| `a3s list` | List all installed A3S tools and brew packages |
-
-### Kubernetes
-
-| Command | Description |
-|---------|-------------|
-| `a3s kube start` | Install and start a local k3s cluster |
-| `a3s kube stop` | Stop the local k3s cluster |
-| `a3s kube status` | Show k3s cluster status |
-
-On macOS, uses [Lima](https://lima-vm.io/) with the `template://k3s` template. On Linux, uses the official k3s install script + systemd. Kubeconfig is written to `~/.kube/config` automatically.
 
 ### A3S ecosystem tools
 
@@ -135,69 +133,132 @@ a3s box ps
 a3s gateway --help
 ```
 
-### Agent scaffolding
+| Command | Description |
+|---------|-------------|
+| `a3s list` | List installed A3S ecosystem tools |
+| `a3s update [tools]` | Update ecosystem tools (all if no names given) |
+| `a3s upgrade` | Upgrade the `a3s` binary itself |
 
-```bash
-# Scaffold a new a3s-code agent project
-a3s code init ./my-agent
-a3s code init --dir ./my-agent  # Python or TypeScript
-```
+### Kubernetes
 
-### Self-update
+| Command | Description |
+|---------|-------------|
+| `a3s kube start` | Install and start a local k3s cluster |
+| `a3s kube stop` | Stop the local k3s cluster |
+| `a3s kube status` | Show k3s cluster status |
 
-```bash
-a3s upgrade
-```
+On macOS, uses [Lima](https://lima-vm.io/) with the `template://k3s` template. On Linux, uses the official k3s install script + systemd.
 
 ## Web UI
 
-When running `a3s up`, a web UI is available at `http://localhost:10350` by default. It shows real-time service status, logs, and health. Disable with `--no-ui` or change the port with `--ui-port`.
+When running `a3s up`, a web UI is available at `http://localhost:10350` by default.
+
+- **Services tab** — real-time status, log stream, per-service restart/stop buttons, resizable sidebar
+- **Kube tab** — k3s cluster management, nodes/namespaces/pods table, pod log viewer
+- **Box tab** — container, image, network, and volume management for `a3s-box`
+
+Disable the UI with `--no-ui`. Change the port with `--ui-port <port>`.
 
 ## Proxy routing
 
-Services with a `subdomain` field are accessible at `http://<subdomain>.localhost:<proxy_port>`. The proxy runs on port 7080 by default.
+Services with a `subdomain` field are reachable at `http://<subdomain>.localhost:<proxy_port>`.
+The proxy runs on port `7080` by default and is configured in the `dev {}` block.
 
 ## Configuration reference
 
 ```hcl
 dev {
-  proxy_port = 7080      # Local reverse proxy port
-  log_level  = "info"    # Logging level: trace, debug, info, warn, error
-}
-
-brew {
-  packages = ["redis"]   # Homebrew packages to install before `a3s up`
+  proxy_port = 7080      # Local reverse proxy port (default: 7080)
+  log_level  = "info"    # Log level: trace, debug, info, warn, error
 }
 
 service "<name>" {
-  cmd        = "..."     # Shell command to run
-  dir        = "."       # Working directory (default: current)
-  port       = 3000      # Port the service listens on (0 = auto-detect)
-  subdomain  = "api"     # Proxy subdomain (optional)
-  depends_on = ["db"]    # Services to start first (optional)
-  disabled   = false     # Set to true to skip this service entirely (optional)
+  cmd        = "..."     # Shell command to run (required)
+  dir        = "."       # Working directory (default: A3sfile.hcl directory)
+  port       = 3000      # Port the service listens on (0 = auto-assign)
+  subdomain  = "api"     # Proxy subdomain: http://<subdomain>.localhost (optional)
+  depends_on = ["db"]    # Services to start before this one (optional)
+  disabled   = false     # Skip this service entirely (optional)
 
-  env = {                # Environment variables (optional, override env_file)
+  env = {                # Environment variables (optional)
     KEY = "value"
   }
 
   env_file = ".env"      # Load variables from a .env file (optional)
+                         # Variables in `env` take precedence over env_file
 
-  watch {                # File watcher — restart on change (optional)
+  watch {                # Restart on file change (optional)
     paths   = ["./src"]
     ignore  = ["target", "node_modules"]
     restart = true
   }
 
-  health {               # Health check (optional)
+  health {               # Health check before unblocking dependents (optional)
     type     = "http"    # http or tcp
     path     = "/health" # HTTP path (http only)
-    interval = "2s"
-    timeout  = "1s"
-    retries  = 5
+    interval = "2s"      # Check interval (default: 2s)
+    timeout  = "1s"      # Per-check timeout (default: 1s)
+    retries  = 5         # Retries before giving up (default: 3)
   }
 }
 ```
+
+## Development
+
+```bash
+# Install UI dependencies
+just ui-install
+
+# Build the React UI (required before cargo build)
+just build-ui
+
+# Run tests
+just test
+
+# Check + lint
+just check
+
+# Format
+just fmt
+```
+
+## Roadmap
+
+### Done ✅
+
+- [x] `A3sfile.hcl` config parsing — `service`, `dev` blocks, `env`/`env_file`, `watch`, `health`, `depends_on`, `disabled`
+- [x] Dependency graph — topological start/stop order, cycle detection
+- [x] Process supervisor — start, stop, restart with SIGTERM + kill fallback
+- [x] Crash recovery — exponential backoff, max 10 restarts, `failed` state
+- [x] File watcher — per-service hot restart on source change, ignore patterns, debounce
+- [x] Health checks — HTTP and TCP, configurable interval/timeout/retries
+- [x] Log aggregator — per-service color output, ring-buffer history (last 200 lines), live broadcast
+- [x] Reverse proxy — subdomain routing (`http://<name>.localhost:<port>`)
+- [x] IPC daemon — Unix socket, JSON-Lines protocol for `status`/`stop`/`restart`/`logs`/`history`
+- [x] Web UI — services view, kube view, box view; SSE log streaming; sidebar resize; restart/stop buttons
+- [x] `a3s up --detach` — background daemon mode
+- [x] `a3s logs --grep` — keyword filtering for log stream
+- [x] `a3s run` / `a3s exec` — one-off commands with service environment
+- [x] `a3s validate` — config validation without starting anything
+- [x] Ecosystem tool proxy — auto-install `a3s-box`, `a3s-gateway`, `a3s-power` from GitHub Releases
+- [x] `a3s upgrade` / `a3s update` — self-update and ecosystem tool updates
+- [x] `a3s kube` — local k3s cluster management (Lima on macOS, systemd on Linux)
+- [x] Port `0` — auto-assign a free port at startup; preserved across restarts
+- [x] `disabled` services — skipped at start, excluded from dependency validation
+
+### In Progress 🚧
+
+- [ ] **Health check → service state** — failed health checks log a warning but do not transition the service to `unhealthy` or trigger restart; `a3s status` never shows `unhealthy`
+- [ ] **kubeconfig merge on macOS** — `merge_kubeconfig_macos` is implemented but never called from `start_macos`; `kubectl` cannot connect to the Lima k3s cluster after `a3s kube start`
+- [ ] **Pod `age` field** — always empty in the web UI kube panel; needs to be derived from pod creation timestamp
+
+### Planned 📋
+
+- [ ] SIGHUP config reload — apply changes to `A3sfile.hcl` without a full restart
+- [ ] Per-service restart policy — configurable `max_restarts`, `backoff`, and `on_failure` behavior in `A3sfile.hcl`
+- [ ] Graceful shutdown timeout — configurable per-service grace period before SIGKILL
+- [ ] File watcher `watcher_stop` on hot restart — currently leaked when a service restarts via the file watcher
+- [ ] Test coverage — `supervisor`, `proxy`, `watcher`, `box_mgr`, `kube` modules have no unit tests
 
 ## License
 
