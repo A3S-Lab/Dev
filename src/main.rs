@@ -75,6 +75,9 @@ enum Commands {
         /// Filter log lines by keyword (case-insensitive)
         #[arg(short, long)]
         grep: Option<String>,
+        /// Number of historical lines to show (default: 200)
+        #[arg(short = 'n', long, default_value_t = 200)]
+        last: usize,
     },
     /// Generate a new A3sfile.hcl in the current directory
     Init,
@@ -208,11 +211,9 @@ async fn run(cli: Cli) -> Result<()> {
             }
 
             if services.is_empty() {
-                sup.start_all().await?;
+                sup.clone().start_all().await?;
             } else {
-                for (idx, name) in services.iter().enumerate() {
-                    sup.start_service(name, idx).await?;
-                }
+                sup.clone().start_named(services).await?;
             }
 
             // Wait for Ctrl+C, SIGTERM (shutdown) or SIGHUP (config reload).
@@ -386,8 +387,8 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{} restarted {}", "✓".green(), service.cyan());
         }
 
-        Commands::Logs { service, follow, grep } => {
-            stream_logs(service.clone(), *follow, grep.clone()).await?;
+        Commands::Logs { service, follow, grep, last } => {
+            stream_logs(service.clone(), *follow, grep.clone(), *last).await?;
         }
 
         Commands::Upgrade => {
@@ -619,8 +620,13 @@ async fn ipc_send(req: IpcRequest) -> Result<IpcResponse> {
     serde_json::from_str(&resp_line).map_err(|e| DevError::Config(format!("bad IPC response: {e}")))
 }
 
-async fn stream_logs(service: Option<String>, follow: bool, grep: Option<String>) -> Result<()> {
-    // First replay history (last 200 lines)
+async fn stream_logs(
+    service: Option<String>,
+    follow: bool,
+    grep: Option<String>,
+    last: usize,
+) -> Result<()> {
+    // First replay history
     {
         let stream = UnixStream::connect(socket_path())
             .await
@@ -628,7 +634,7 @@ async fn stream_logs(service: Option<String>, follow: bool, grep: Option<String>
         let (reader, mut writer) = tokio::io::split(stream);
         let req = IpcRequest::History {
             service: service.clone(),
-            lines: 200,
+            lines: last,
         };
         writer
             .write_all(

@@ -116,6 +116,7 @@ service "db" {
 | `a3s status` | Show service status table |
 | `a3s logs [--service name]` | Tail logs (all or one service) |
 | `a3s logs --grep <keyword>` | Filter log output by keyword |
+| `a3s logs --last N` | Show last N lines of history (default: 200) |
 | `a3s run <cmd>` | Run a one-off command with env merged from all services |
 | `a3s run --service <name> <cmd>` | Run with env from a specific service |
 | `a3s exec <service> -- <cmd>` | Run a command in a service's working directory and env |
@@ -248,6 +249,10 @@ just fmt
 - [x] **Per-service restart policy** — `restart {}` block with `max_restarts` (default 10), `backoff` (default 1s), `max_backoff` (default 30s), `on_failure = "restart"|"stop"`; exponential backoff; `on_failure = "stop"` leaves service stopped after crash
 - [x] **Graceful shutdown timeout** — `stop_timeout` field (default 5s); SIGTERM sent first, SIGKILL after timeout
 - [x] **Test coverage** — unit tests added for `config`, `graph`, `proxy`, `watcher` modules (64 tests total)
+- [x] **Parallel service startup** — services with no inter-dependencies start concurrently within each dependency wave; serial correctness is preserved (wave N starts only after wave N-1 completes)
+- [x] **Selective startup with dep resolution** — `a3s up api` automatically starts `db` (and any other transitive deps) in dependency order before `api`
+- [x] **`a3s logs --last N`** — configurable history line count (default 200); e.g. `a3s logs --last 50`
+- [x] **Supervisor unit tests** — lifecycle tests for start, stop, restart, start_all, start_named (78 tests total)
 
 ## License
 

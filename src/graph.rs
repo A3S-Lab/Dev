@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::config::DevConfig;
 use crate::error::{DevError, Result};
@@ -6,47 +6,56 @@ use crate::error::{DevError, Result};
 pub struct DependencyGraph {
     /// Services in topological start order
     order: Vec<String>,
+    /// Groups of services that can start concurrently (each wave's deps are fully in prior waves)
+    waves: Vec<Vec<String>>,
+    /// Per-service direct deps (for transitive closure queries)
+    deps: HashMap<String, Vec<String>>,
 }
 
 impl DependencyGraph {
     pub fn from_config(cfg: &DevConfig) -> Result<Self> {
         let names: Vec<&str> = cfg.service.keys().map(|s| s.as_str()).collect();
 
-        // Build adjacency: name -> list of names that depend on it (reverse edges for Kahn's)
         let mut in_degree: HashMap<&str, usize> = names.iter().map(|n| (*n, 0)).collect();
         let mut dependents: HashMap<&str, Vec<&str>> = names.iter().map(|n| (*n, vec![])).collect();
+        let deps: HashMap<String, Vec<String>> = cfg
+            .service
+            .iter()
+            .map(|(k, v)| (k.clone(), v.depends_on.clone()))
+            .collect();
 
         for (name, svc) in &cfg.service {
             for dep in &svc.depends_on {
                 *in_degree.entry(name.as_str()).or_insert(0) += 1;
-                dependents
-                    .entry(dep.as_str())
-                    .or_default()
-                    .push(name.as_str());
+                dependents.entry(dep.as_str()).or_default().push(name.as_str());
             }
         }
 
-        // Kahn's algorithm — preserve declaration order as tiebreaker
-        let mut queue: VecDeque<&str> = names
-            .iter()
-            .filter(|n| in_degree[*n] == 0)
-            .copied()
-            .collect();
-
+        // BFS level-by-level: each level becomes one startup wave.
+        // Preserves declaration order as tiebreaker (names vec is insertion-ordered).
+        let mut queue: VecDeque<&str> =
+            names.iter().filter(|n| in_degree[*n] == 0).copied().collect();
         let mut order = Vec::with_capacity(names.len());
-        while let Some(node) = queue.pop_front() {
-            order.push(node.to_string());
-            for &dep in &dependents[node] {
-                let deg = in_degree.get_mut(dep).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(dep);
+        let mut waves: Vec<Vec<String>> = Vec::new();
+
+        while !queue.is_empty() {
+            let wave: Vec<&str> = queue.drain(..).collect();
+            let mut next: VecDeque<&str> = VecDeque::new();
+            for &node in &wave {
+                order.push(node.to_string());
+                for &dep in &dependents[node] {
+                    let deg = in_degree.get_mut(dep).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        next.push_back(dep);
+                    }
                 }
             }
+            waves.push(wave.iter().map(|s| s.to_string()).collect());
+            queue = next;
         }
 
         if order.len() < names.len() {
-            // Find nodes still in cycle
             let cycled: Vec<&str> = names
                 .iter()
                 .filter(|n| !order.iter().any(|o| o == *n))
@@ -55,15 +64,39 @@ impl DependencyGraph {
             return Err(DevError::Cycle(cycled.join(", ")));
         }
 
-        Ok(Self { order })
+        Ok(Self { order, waves, deps })
     }
 
     pub fn start_order(&self) -> &[String] {
         &self.order
     }
 
+    /// Groups of services that can start concurrently.
+    /// All services in wave N have their deps satisfied by waves 0..N.
+    pub fn start_waves(&self) -> &[Vec<String>] {
+        &self.waves
+    }
+
     pub fn stop_order(&self) -> impl Iterator<Item = &str> {
         self.order.iter().rev().map(|s| s.as_str())
+    }
+
+    /// Returns `names` plus all their transitive deps, in topological start order.
+    pub fn transitive_start_order(&self, names: &[&str]) -> Vec<String> {
+        let mut needed: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+        let mut queue: VecDeque<String> = names.iter().map(|s| s.to_string()).collect();
+        while let Some(node) = queue.pop_front() {
+            for dep in self.deps.get(&node).into_iter().flatten() {
+                if needed.insert(dep.clone()) {
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+        self.order
+            .iter()
+            .filter(|n| needed.contains(*n))
+            .cloned()
+            .collect()
     }
 }
 
@@ -116,7 +149,6 @@ mod tests {
 
     #[test]
     fn test_stop_order_is_reverse_of_start() {
-        // b depends on a → start [a, b], stop [b, a]
         let cfg = make_config(vec![("b", vec!["a"]), ("a", vec![])]);
         let g = DependencyGraph::from_config(&cfg).unwrap();
         let start: Vec<&str> = g.start_order().iter().map(|s| s.as_str()).collect();
@@ -134,7 +166,6 @@ mod tests {
 
     #[test]
     fn test_chain_three() {
-        // c → b → a: start order must be a, b, c
         let cfg = make_config(vec![("c", vec!["b"]), ("b", vec!["a"]), ("a", vec![])]);
         let g = DependencyGraph::from_config(&cfg).unwrap();
         let order = g.start_order();
@@ -148,5 +179,81 @@ mod tests {
         let cfg = make_config(vec![]);
         let g = DependencyGraph::from_config(&cfg).unwrap();
         assert!(g.start_order().is_empty());
+    }
+
+    #[test]
+    fn test_start_waves_no_deps() {
+        // All independent services → single wave
+        let cfg = make_config(vec![("a", vec![]), ("b", vec![]), ("c", vec![])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let waves = g.start_waves();
+        assert_eq!(waves.len(), 1);
+        assert_eq!(waves[0].len(), 3);
+    }
+
+    #[test]
+    fn test_start_waves_chain() {
+        // c→b→a: three separate waves
+        let cfg = make_config(vec![("c", vec!["b"]), ("b", vec!["a"]), ("a", vec![])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let waves = g.start_waves();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], ["a"]);
+        assert_eq!(waves[1], ["b"]);
+        assert_eq!(waves[2], ["c"]);
+    }
+
+    #[test]
+    fn test_start_waves_diamond() {
+        // d depends on b and c; b and c both depend on a
+        // wave 0: a, wave 1: b+c, wave 2: d
+        let cfg = make_config(vec![
+            ("a", vec![]),
+            ("b", vec!["a"]),
+            ("c", vec!["a"]),
+            ("d", vec!["b", "c"]),
+        ]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let waves = g.start_waves();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], ["a"]);
+        // b and c in same wave (order may vary)
+        assert_eq!(waves[1].len(), 2);
+        assert!(waves[1].contains(&"b".to_string()));
+        assert!(waves[1].contains(&"c".to_string()));
+        assert_eq!(waves[2], ["d"]);
+    }
+
+    #[test]
+    fn test_transitive_start_order_direct() {
+        let cfg = make_config(vec![("a", vec![]), ("b", vec!["a"]), ("c", vec!["b"])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        // Requesting "c" should pull in a, b, c
+        let result = g.transitive_start_order(&["c"]);
+        assert_eq!(result, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_transitive_start_order_subset() {
+        // Only a and b declared, requesting "b" only needs a+b (not c if c existed)
+        let cfg = make_config(vec![
+            ("a", vec![]),
+            ("b", vec!["a"]),
+            ("c", vec![]),
+        ]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let result = g.transitive_start_order(&["b"]);
+        assert_eq!(result, ["a", "b"]);
+        // c not included
+        assert!(!result.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_transitive_start_order_already_included() {
+        // Requesting both "a" and "b" where b depends on a — no duplicates
+        let cfg = make_config(vec![("a", vec![]), ("b", vec!["a"])]);
+        let g = DependencyGraph::from_config(&cfg).unwrap();
+        let result = g.transitive_start_order(&["a", "b"]);
+        assert_eq!(result, ["a", "b"]);
     }
 }
