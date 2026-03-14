@@ -361,10 +361,10 @@ impl Supervisor {
     }
 
     pub async fn stop_service(&self, name: &str) {
-        let stop_timeout = self
-            .cfg()
-            .service
-            .get(name)
+        let cfg = self.cfg();
+        let svc_def = cfg.service.get(name).cloned();
+        let stop_timeout = svc_def
+            .as_ref()
             .map(|s| s.stop_timeout)
             .unwrap_or(std::time::Duration::from_secs(5));
 
@@ -411,6 +411,16 @@ impl Supervisor {
             let _ = kill(pgid, Signal::SIGKILL);
         }
         let _ = child.kill().await;
+
+        // Run post_stop hook after the process is gone.
+        if let Some(svc) = svc_def {
+            if let Some(ref hook) = svc.post_stop {
+                tracing::info!("[{name}] running post_stop: {hook}");
+                if let Err(e) = spawn::run_hook(hook, &svc, name).await {
+                    tracing::warn!("[{name}] post_stop hook failed: {e}");
+                }
+            }
+        }
     }
 
     /// Stop only the named services and any services that transitively depend on them,
@@ -808,6 +818,8 @@ mod tests {
             env: Default::default(),
             env_file: None,
             log_file: None,
+            pre_start: None,
+            post_stop: None,
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             watch: None,
             health: None,

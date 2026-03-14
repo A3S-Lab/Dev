@@ -153,6 +153,8 @@ mod tests {
                     env: Default::default(),
                     env_file: None,
                     log_file: None,
+                    pre_start: None,
+                    post_stop: None,
                     depends_on: deps.iter().map(|s| s.to_string()).collect(),
                     watch: None,
                     health: None,

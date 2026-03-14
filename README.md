@@ -158,6 +158,12 @@ The proxy runs on port `7080` by default and is configured in the `dev {}` block
 
 ## Configuration reference
 
+A `.env` file in the same directory as `A3sfile.hcl` is automatically loaded and applied as the
+lowest-priority env source for every service. Variables in `env` and `env_file` take precedence.
+
+`${VAR}` placeholders in `cmd`, `env` values, and hook commands are expanded from OS environment
+variables at startup. Unknown variables are left as `${VAR}`.
+
 ```hcl
 dev {
   proxy_port = 7080      # Local reverse proxy port (default: 7080)
@@ -180,6 +186,10 @@ service "<name>" {
                          # Variables in `env` take precedence over env_file
   log_file = "logs/api.log"  # Append stdout/stderr to this file (optional)
                              # Relative to A3sfile.hcl directory
+
+  pre_start = "migrate db"   # Shell command to run before starting (optional)
+                             # Non-zero exit aborts startup
+  post_stop = "cleanup.sh"   # Shell command to run after stopping (optional)
 
   watch {                # Restart on file change (optional)
     paths   = ["./src"]
@@ -267,6 +277,9 @@ just fmt
 - [x] **`a3s up --detach --wait`** — blocks until all services reach `running` state; polls IPC every 500 ms; `--wait-timeout N` (default 60 s); exits non-zero if any service `failed`
 - [x] **`a3s ps`** — alias for `a3s status`
 - [x] **`a3s status --json`** — machine-readable JSON output for scripts and monitoring; 83 tests total
+- [x] **Global `.env` auto-discovery** — a `.env` file in the same directory as `A3sfile.hcl` is automatically loaded as the lowest-priority env source for all services (below per-service `env` and `env_file`)
+- [x] **`pre_start` / `post_stop` hooks** — optional shell commands run before a service starts (abort on non-zero exit) and after it stops; run in the service's working directory with its environment
+- [x] **Env var interpolation** — `${VAR}` placeholders in `cmd`, `env` values, and hook commands are replaced with OS environment variable values at config load time; unknown variables are preserved as-is; 93 tests total
 
 ## License
 

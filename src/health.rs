@@ -114,6 +114,8 @@ mod tests {
             env: Default::default(),
             env_file: None,
             log_file: None,
+            pre_start: None,
+            post_stop: None,
             depends_on: vec![],
             watch: None,
             health: None,

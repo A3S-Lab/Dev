@@ -58,6 +58,13 @@ pub struct ServiceDef {
     /// Write stdout/stderr to this file (append mode). Relative to the A3sfile.hcl directory.
     #[serde(default)]
     pub log_file: Option<PathBuf>,
+    /// Shell command to run (in the service's working directory) before starting the service.
+    /// A non-zero exit code aborts startup.
+    #[serde(default)]
+    pub pre_start: Option<String>,
+    /// Shell command to run (in the service's working directory) after the service stops.
+    #[serde(default)]
+    pub post_stop: Option<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
@@ -199,6 +206,45 @@ mod duration_serde {
     }
 }
 
+/// Replace `${VAR}` placeholders in `s` with OS environment variable values.
+/// Unknown variables are left as-is (the `${VAR}` literal is preserved).
+pub fn interpolate_env_vars(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next(); // consume '{'
+            let var_name: String = chars.by_ref().take_while(|&c| c != '}').collect();
+            if let Ok(val) = std::env::var(&var_name) {
+                result.push_str(&val);
+            } else {
+                result.push_str(&format!("${{{var_name}}}"));
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Parse a `.env`-style file and return a map of key → value.
+/// Lines starting with `#` and blank lines are ignored.
+fn parse_env_file(contents: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let key = k.trim().to_string();
+            let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            map.insert(key, val);
+        }
+    }
+    map
+}
+
 impl DevConfig {
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let src = std::fs::read_to_string(path)
@@ -207,6 +253,8 @@ impl DevConfig {
             .map_err(|e| DevError::Config(format!("parse error in {}: {e}", path.display())))?;
         let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
         cfg.resolve_env_files(base_dir)?;
+        cfg.apply_global_dotenv(base_dir);
+        cfg.apply_interpolation();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -229,21 +277,43 @@ impl DevConfig {
                     path.display()
                 ))
             })?;
-            for line in contents.lines() {
-                let line = line.trim();
-                // Skip blank lines and comments
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((k, v)) = line.split_once('=') {
-                    let key = k.trim().to_string();
-                    let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
-                    // env takes precedence over env_file
-                    svc.env.entry(key).or_insert(val);
-                }
+            for (k, v) in parse_env_file(&contents) {
+                svc.env.entry(k).or_insert(v);
             }
         }
         Ok(())
+    }
+
+    /// Load a project-level `.env` from the A3sfile.hcl directory and apply it as the
+    /// lowest-priority env source for every service (below `env` and `env_file`).
+    fn apply_global_dotenv(&mut self, base_dir: &std::path::Path) {
+        let path = base_dir.join(".env");
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let global = parse_env_file(&contents);
+        for svc in self.service.values_mut() {
+            for (k, v) in &global {
+                svc.env.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+
+    /// Interpolate `${VAR}` placeholders in `cmd` and `env` values using OS environment variables.
+    fn apply_interpolation(&mut self) {
+        for svc in self.service.values_mut() {
+            svc.cmd = interpolate_env_vars(&svc.cmd);
+            for v in svc.env.values_mut() {
+                *v = interpolate_env_vars(v);
+            }
+            if let Some(ref h) = svc.pre_start.clone() {
+                svc.pre_start = Some(interpolate_env_vars(h));
+            }
+            if let Some(ref h) = svc.post_stop.clone() {
+                svc.post_stop = Some(interpolate_env_vars(h));
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -292,6 +362,8 @@ mod tests {
             env: Default::default(),
             env_file: None,
             log_file: None,
+            pre_start: None,
+            post_stop: None,
             depends_on: depends_on.into_iter().map(|s| s.to_string()).collect(),
             watch: None,
             health: None,
@@ -494,5 +566,126 @@ service "api" {
         let a = make_svc(3000, vec![]);
         let b = make_svc(3001, vec![]);
         assert_ne!(a, b);
+    }
+
+    // ── Global .env auto-discovery ─────────────────────────────────────────────
+
+    #[test]
+    fn test_global_dotenv_applied_to_all_services() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "GLOBAL_VAR=hello\n").unwrap();
+        let hcl_path = dir.path().join("A3sfile.hcl");
+        std::fs::write(
+            &hcl_path,
+            r#"
+service "a" { cmd = "echo" }
+service "b" { cmd = "echo" }
+"#,
+        )
+        .unwrap();
+        let cfg = DevConfig::from_file(&hcl_path).unwrap();
+        assert_eq!(cfg.service["a"].env.get("GLOBAL_VAR").map(|s| s.as_str()), Some("hello"));
+        assert_eq!(cfg.service["b"].env.get("GLOBAL_VAR").map(|s| s.as_str()), Some("hello"));
+    }
+
+    #[test]
+    fn test_service_env_overrides_global_dotenv() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "FOO=global\n").unwrap();
+        let hcl_path = dir.path().join("A3sfile.hcl");
+        std::fs::write(
+            &hcl_path,
+            "service \"a\" {\n  cmd = \"echo\"\n  env = { FOO = \"local\" }\n}\n",
+        )
+        .unwrap();
+        let cfg = DevConfig::from_file(&hcl_path).unwrap();
+        assert_eq!(cfg.service["a"].env.get("FOO").map(|s| s.as_str()), Some("local"));
+    }
+
+    #[test]
+    fn test_no_global_dotenv_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        let hcl_path = dir.path().join("A3sfile.hcl");
+        std::fs::write(&hcl_path, "service \"a\" { cmd = \"echo\" }\n").unwrap();
+        assert!(DevConfig::from_file(&hcl_path).is_ok());
+    }
+
+    // ── Env var interpolation ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_interpolate_known_var() {
+        std::env::set_var("_A3S_TEST_INTERP", "world");
+        let result = interpolate_env_vars("hello ${_A3S_TEST_INTERP}");
+        assert_eq!(result, "hello world");
+        std::env::remove_var("_A3S_TEST_INTERP");
+    }
+
+    #[test]
+    fn test_interpolate_unknown_var_preserved() {
+        let result = interpolate_env_vars("${_A3S_DEFINITELY_NOT_SET_XYZ}");
+        assert_eq!(result, "${_A3S_DEFINITELY_NOT_SET_XYZ}");
+    }
+
+    #[test]
+    fn test_interpolate_no_placeholders() {
+        assert_eq!(interpolate_env_vars("plain string"), "plain string");
+    }
+
+    #[test]
+    fn test_interpolate_multiple_vars() {
+        std::env::set_var("_A3S_X", "foo");
+        std::env::set_var("_A3S_Y", "bar");
+        let result = interpolate_env_vars("${_A3S_X}-${_A3S_Y}");
+        assert_eq!(result, "foo-bar");
+        std::env::remove_var("_A3S_X");
+        std::env::remove_var("_A3S_Y");
+    }
+
+    #[test]
+    fn test_interpolation_in_cmd_and_env_via_from_file() {
+        std::env::set_var("_A3S_HOST", "db.local");
+        let dir = tempfile::tempdir().unwrap();
+        let hcl_path = dir.path().join("A3sfile.hcl");
+        std::fs::write(
+            &hcl_path,
+            r#"
+service "api" {
+  cmd = "echo ${_A3S_HOST}"
+  env = { DB_HOST = "${_A3S_HOST}" }
+}
+"#,
+        )
+        .unwrap();
+        let cfg = DevConfig::from_file(&hcl_path).unwrap();
+        assert_eq!(cfg.service["api"].cmd, "echo db.local");
+        assert_eq!(
+            cfg.service["api"].env.get("DB_HOST").map(|s| s.as_str()),
+            Some("db.local")
+        );
+        std::env::remove_var("_A3S_HOST");
+    }
+
+    // ── pre_start / post_stop hooks ───────────────────────────────────────────
+
+    #[test]
+    fn test_pre_start_post_stop_parsed() {
+        let src = r#"
+service "api" {
+  cmd       = "echo"
+  pre_start = "echo starting"
+  post_stop = "echo stopped"
+}
+"#;
+        let cfg: DevConfig = hcl::from_str(src).unwrap();
+        assert_eq!(cfg.service["api"].pre_start.as_deref(), Some("echo starting"));
+        assert_eq!(cfg.service["api"].post_stop.as_deref(), Some("echo stopped"));
+    }
+
+    #[test]
+    fn test_pre_start_default_none() {
+        let src = r#"service "api" { cmd = "echo" }"#;
+        let cfg: DevConfig = hcl::from_str(src).unwrap();
+        assert!(cfg.service["api"].pre_start.is_none());
+        assert!(cfg.service["api"].post_stop.is_none());
     }
 }

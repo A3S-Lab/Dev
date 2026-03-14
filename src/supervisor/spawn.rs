@@ -19,9 +19,38 @@ pub struct SpawnResult {
     pub pid: u32,
 }
 
+/// Run a hook command (in the service working directory).
+/// Returns an error if the hook exits non-zero.
+pub(super) async fn run_hook(hook: &str, svc: &ServiceDef, label: &str) -> Result<()> {
+    let parts = split_cmd(hook);
+    let program = parts.first().map(|s| s.as_str()).unwrap_or("sh");
+    let mut cmd = Command::new(program);
+    cmd.args(&parts[1..]).envs(&svc.env);
+    if let Some(dir) = &svc.dir {
+        cmd.current_dir(dir);
+    }
+    let status = cmd.status().await.map_err(|e| DevError::Process {
+        service: label.to_string(),
+        msg: format!("{label} hook: {e}"),
+    })?;
+    if !status.success() {
+        return Err(DevError::Process {
+            service: label.to_string(),
+            msg: format!("{label} hook exited with {status}"),
+        });
+    }
+    Ok(())
+}
+
 /// Spawn a service process, attach stdout to the log aggregator, and return the child.
 /// Stderr is forwarded to the log aggregator as well.
 pub async fn spawn_process(spec: &SpawnSpec<'_>, log: &Arc<LogAggregator>) -> Result<SpawnResult> {
+    // Run pre_start hook before launching the service process.
+    if let Some(ref hook) = spec.svc.pre_start {
+        tracing::info!("[{}] running pre_start: {hook}", spec.name);
+        run_hook(hook, spec.svc, spec.name).await?;
+    }
+
     let parts = split_cmd(&spec.svc.cmd);
     let program = parts.first().map(|s| s.as_str()).unwrap_or("sh");
     let args = &parts[1..];
