@@ -70,6 +70,11 @@ jobs:
       - name: Setup workspace context
         run: bash .github/setup-workspace.sh
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
